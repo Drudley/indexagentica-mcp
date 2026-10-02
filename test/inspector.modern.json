@@ -1,0 +1,6 @@
+{
+  "mcpServers": {
+    "local-modern": { "type": "streamable-http", "url": "http://127.0.0.1:8787/mcp", "protocolEra": "modern" },
+    "local-auto": { "type": "streamable-http", "url": "http://127.0.0.1:8787/mcp", "protocolEra": "auto" }
+  }
+}
