@@ -52,6 +52,7 @@ export function openapi(base) {
           responses: { 200: { description: "Item (see LongformItem in https://indexagentica.com/openapi.json); skills include skill_md" }, 400: { description: "Bad request", content: { "application/json": { schema: err } } }, 404: { description: "Not found, with suggestions", content: { "application/json": { schema: err } } } },
         },
       },
+      "/.well-known/mcp/server-card.json": { get: { operationId: "getServerCard", summary: "Static MCP server card (serverInfo, authentication, tools, resources, prompts), generated from the tool definitions", responses: { 200: { description: "Server card" } } } },
       "/categories": { get: { operationId: "listCategories", summary: "List categories with counts", responses: { 200: { description: "Categories" } } } },
       "/mcp": { post: { operationId: "mcp", summary: "MCP Streamable HTTP endpoint (JSON-RPC 2.0)", responses: { 200: { description: "JSON-RPC response" }, 202: { description: "Notification accepted" } } } },
     },

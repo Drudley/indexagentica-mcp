@@ -1,10 +1,11 @@
 // Index Agentica MCP + REST Worker.
-import { handleMcpPost, SERVER_INFO, SUPPORTED_VERSIONS } from "./mcp.js";
+import { handleMcpPost, SERVER_INFO, SUPPORTED_VERSIONS, INSTRUCTIONS } from "./mcp.js";
 import { runSearch, runGetEntry, runGetContent, runListCategories, toolDefinitions, ToolInputError, NotFoundError } from "./tools.js";
 import { summarizeLongform } from "./search.js";
 import { checkRateLimit } from "./ratelimit.js";
 import { getData } from "./data.js";
 import { openapi } from "./openapi.js";
+import { newLog, noteArgs, writeLog } from "./analytics.js";
 
 const CORS = {
   "access-control-allow-origin": "*",
@@ -28,6 +29,10 @@ function errorJson(status, code, message, extra = {}, headers = {}) {
   return json(status, { error: { status, code, message, ...extra } }, headers);
 }
 
+function safeDecode(v) {
+  try { return decodeURIComponent(v); } catch { return "invalid"; }
+}
+
 function baseUrl(request, env) {
   return env.PUBLIC_BASE_URL || new URL(request.url).origin;
 }
@@ -37,6 +42,25 @@ function originAllowed(request, env) {
   const allowed = (env.ALLOWED_ORIGINS || "*").trim();
   if (!origin || allowed === "*") return true;
   return allowed.split(",").map((s) => s.trim()).includes(origin);
+}
+
+/**
+ * Static MCP server card (Smithery's scan fallback, SEP-1649 shape), generated
+ * from the same tool definitions as tools/list so it can't drift.
+ */
+export function serverCard(request, env) {
+  return {
+    serverInfo: { ...SERVER_INFO },
+    description: "Read-only search over the Index Agentica directory of agent tools, MCP servers, APIs, protocols and skills, plus guides, comparisons, stacks and downloadable skills.",
+    instructions: INSTRUCTIONS,
+    transport: { type: "streamable-http", url: `${baseUrl(request, env)}/mcp` },
+    protocolVersions: SUPPORTED_VERSIONS,
+    authentication: { required: false },
+    capabilities: { tools: { listChanged: false } },
+    tools: toolDefinitions(),
+    resources: [],
+    prompts: [],
+  };
 }
 
 function landing(request, env) {
@@ -61,6 +85,7 @@ function landing(request, env) {
       content_list: `${base}/content?type={guide|comparison|stack|skill}`,
       categories: `${base}/categories`,
       openapi: `${base}/openapi.json`,
+      server_card: `${base}/.well-known/mcp/server-card.json`,
     },
     rate_limit: {
       requests: Number(env.RATE_LIMIT_REQUESTS) || 120,
@@ -94,7 +119,20 @@ async function rest(fn, ok = (r) => json(200, r, { "cache-control": "public, max
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    let path = url.pathname.replace(/\/+$/, "") || "/";
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+    // One Analytics Engine data point per request, except preflights and unmetered housekeeping.
+    const skip = request.method.toUpperCase() === "OPTIONS" || ["/health", "/favicon.ico", "/robots.txt"].includes(path);
+    const log = skip ? null : newLog(request, path);
+    const res = await handle(request, env, ctx, url, path, log);
+    if (log) {
+      if (res.status >= 400 && !log.detail) log.detail = String(res.status);
+      writeLog(env, request, log, res.status);
+    }
+    return res;
+  },
+};
+
+async function handle(request, env, ctx, url, path, log) {
     const method = request.method.toUpperCase();
 
     if (method === "OPTIONS") return empty(204);
@@ -128,7 +166,7 @@ export default {
     };
 
     if (path === "/mcp") {
-      if (method === "POST") return withRl(handleMcpPost(request, env, ctx, json, empty));
+      if (method === "POST") return withRl(handleMcpPost(request, env, ctx, json, empty, log));
       return errorJson(405, "method_not_allowed", "The MCP endpoint accepts POST only (stateless Streamable HTTP; no GET/SSE stream, no sessions).", {}, { allow: "POST, OPTIONS" });
     }
 
@@ -137,6 +175,7 @@ export default {
     }
 
     if (path === "/") return withRl(Promise.resolve(json(200, landing(request, env), { "cache-control": "public, max-age=300" })));
+    if (path === "/.well-known/mcp/server-card.json") return withRl(Promise.resolve(json(200, serverCard(request, env), { "cache-control": "public, max-age=3600" })));
     if (path === "/openapi.json") return withRl(Promise.resolve(json(200, openapi(baseUrl(request, env)), { "cache-control": "public, max-age=3600" })));
 
     if (path === "/search") {
@@ -146,21 +185,31 @@ export default {
       const tags = tagsParam ? tagsParam.split(",").map((t) => t.trim()).filter(Boolean) : undefined;
       const limitParam = url.searchParams.get("limit");
       const type = url.searchParams.get("type") || undefined;
-      return withRl(rest(() => runSearch(env, ctx, { query: q, type, category, tags, limit: limitParam == null || limitParam === "" ? undefined : Number(limitParam) })));
+      noteArgs(log, "search", { query: q, type, category });
+      return withRl(rest(async () => {
+        const r = await runSearch(env, ctx, { query: q, type, category, tags, limit: limitParam == null || limitParam === "" ? undefined : Number(limitParam) });
+        if (log) log.resultCount = r.total;
+        return r;
+      }));
     }
 
     const m = /^\/entries\/([^/]+?)(?:\.json)?$/.exec(path);
-    if (m) return withRl(rest(async () => (await runGetEntry(env, ctx, { id: decodeURIComponent(m[1]) })).entry));
+    if (m) {
+      noteArgs(log, "get_entry", { id: safeDecode(m[1]) });
+      return withRl(rest(async () => (await runGetEntry(env, ctx, { id: decodeURIComponent(m[1]) })).entry));
+    }
 
     const c = /^\/content\/([^/]+)\/([^/]+?)(?:\.json)?$/.exec(path);
     if (c) {
       const includeHtml = ["1", "true"].includes(url.searchParams.get("include_html") || "");
+      noteArgs(log, "get_content", { type: safeDecode(c[1]), id: safeDecode(c[2]) });
       return withRl(rest(async () => (await runGetContent(env, ctx, { type: decodeURIComponent(c[1]), id: decodeURIComponent(c[2]), include_html: includeHtml })).content));
     }
 
     if (path === "/content") {
       return withRl(rest(async () => {
         const type = url.searchParams.get("type");
+        noteArgs(log, "list_content", { type });
         if (type && !["guide", "comparison", "stack", "skill"].includes(type)) throw new ToolInputError("type must be one of: guide, comparison, stack, skill");
         const d = await getData(env, ctx);
         const items = d.longform.filter((x) => !type || x.type === type).map((x) => summarizeLongform(x));
@@ -168,7 +217,10 @@ export default {
       }));
     }
 
-    if (path === "/categories") return withRl(rest(() => runListCategories(env, ctx)));
+    if (path === "/categories") {
+      noteArgs(log, "list_categories", null);
+      return withRl(rest(() => runListCategories(env, ctx)));
+    }
 
     if (path === "/entries") {
       return withRl(rest(async () => {
@@ -178,5 +230,4 @@ export default {
     }
 
     return errorJson(404, "not_found", `No route for ${path}. See / for the list of endpoints.`);
-  },
-};
+}

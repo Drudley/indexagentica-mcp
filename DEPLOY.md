@@ -133,6 +133,7 @@ complex than (a) and costs a second domain, so it's not recommended.
    | User | **User Details : Read** | wrangler (`whoami`) |
    | User | **Memberships : Read** | wrangler account resolution |
    | Account | Workers Tail : Read *(optional)* | `wrangler tail` live logs |
+   | Account | Account Analytics : Read *(optional)* | querying the `indexagentica_mcp` Analytics Engine dataset via the SQL API (usage reports). Writing from the Worker needs no token permission; the dataset is created on first write |
    | Zone (indexagentica.com) | **Workers Routes : Edit** | attaching the Custom Domain / routes (option a) |
    | Zone (indexagentica.com) | **Zone : Read** | wrangler resolving the zone for `custom_domain = true` (option a) |
    | Zone (indexagentica.com) | DNS : Edit *(optional)* | only if an agent should manage the zone's DNS records via API (for example recreating the GitHub Pages records or adding future TXT records). Not needed for the Worker itself |

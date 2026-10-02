@@ -32,6 +32,13 @@ namespace_id = "4201"
   limit = 120
   period = 60
 
+# Usage logging (src/analytics.js): one data point per request. Workers Free includes
+# 100,000 data points written per day. Environments don't inherit this binding, so
+# [env.ratelimit-test] runs without it (logging is a no-op there).
+[[analytics_engine_datasets]]
+binding = "ANALYTICS"
+dataset = "indexagentica_mcp"
+
 [observability]
 enabled = true
 

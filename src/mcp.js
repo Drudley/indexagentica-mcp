@@ -9,6 +9,7 @@
 // GET/DELETE on the endpoint -> 405 (allowed by every revision).
 
 import { toolDefinitions, TOOL_IMPLS, ToolInputError, NotFoundError } from "./tools.js";
+import { noteClient, noteArgs } from "./analytics.js";
 import { getData } from "./data.js";
 
 export const SERVER_INFO = {
@@ -22,7 +23,7 @@ export const LEGACY_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26"];
 export const SUPPORTED_VERSIONS = [...MODERN_VERSIONS, ...LEGACY_VERSIONS];
 const LIST_TTL_MS = 10 * 60 * 1000;
 
-const INSTRUCTIONS =
+export const INSTRUCTIONS =
   "Index Agentica (https://indexagentica.com) is an agent-first directory of skills, agent harnesses, MCP servers, tools, protocols, APIs, information sources, finance/payment rails and other directories, plus long-form guides, comparisons, stacks and downloadable Agent Skills. " +
   "Use `search` to find resources by keywords, type (entry, guide, comparison, stack, skill), category and tags; `get_entry` for the full record of one directory entry; `get_content` (type + id) for a guide, comparison, stack or skill with its markdown; `list_categories` for the category slugs and counts. " +
   "Data is read-only, refreshed from the published site every ~10 minutes, and licensed CC BY 4.0. To add or correct an entry, see https://indexagentica.com/agents/#contribute.";
@@ -97,7 +98,7 @@ async function categorySlugs(env, ctx) {
  * Dispatch one JSON-RPC request. Returns { status, body } where body is the
  * JSON-RPC response object, or null for notifications (-> 202).
  */
-async function dispatch(env, ctx, msg, era, version) {
+async function dispatch(env, ctx, msg, era, version, log = null) {
   const { id, method } = msg;
   const params = msg.params && typeof msg.params === "object" ? msg.params : {};
   const modern = era === "modern";
@@ -141,7 +142,13 @@ async function dispatch(env, ctx, msg, era, version) {
     }
     case "tools/call": {
       if (typeof params.name !== "string") return { status: 200, body: rpcError(id, ERR.INVALID_PARAMS, "params.name (string) is required") };
+      if (log) noteArgs(log, params.name, params.arguments);
       const r = await callTool(env, ctx, params.name, params.arguments);
+      if (log && r.result) {
+        if (r.result.isError) { log.toolError = true; log.detail = "tool_error"; }
+        const sc = r.result.structuredContent;
+        if (sc && Number.isFinite(sc.total)) log.resultCount = sc.total;
+      }
       if (r.rpcError) return { status: 200, body: rpcError(id, r.rpcError.code, r.rpcError.message) };
       return ok(r.result);
     }
@@ -166,7 +173,12 @@ function validRequest(msg) {
 /**
  * Handle POST /mcp. `json(status, body, extraHeaders)` builds the response.
  */
-export async function handleMcpPost(request, env, ctx, json, empty) {
+export async function handleMcpPost(request, env, ctx, json0, empty, log = null) {
+  // Wrap the response builder so JSON-RPC errors are recorded for usage logging.
+  const json = (status, b, h) => {
+    if (log && b && !Array.isArray(b) && b.error) { log.rpcError = true; log.detail = String(b.error.code); }
+    return json0(status, b, h);
+  };
   const raw = await request.text();
   if (raw.length > 64 * 1024) return json(413, rpcError(null, ERR.INVALID_REQUEST, "Request body too large (max 64 KiB)"));
   let msg;
@@ -177,6 +189,12 @@ export async function handleMcpPost(request, env, ctx, json, empty) {
   }
 
   const hdrVersion = request.headers.get("mcp-protocol-version");
+  if (log) {
+    log.protocol = hdrVersion || "";
+    if (Array.isArray(msg)) log.method = "batch";
+    else if (msg && typeof msg.method === "string") log.method = msg.method;
+    if (msg && !Array.isArray(msg)) noteClient(log, msg.params);
+  }
 
   // Legacy (2025-03-26) JSON-RPC batch support.
   if (Array.isArray(msg)) {
@@ -192,6 +210,7 @@ export async function handleMcpPost(request, env, ctx, json, empty) {
         continue;
       }
       out.push((await dispatch(env, ctx, m, "legacy", "2025-03-26")).body);
+      if (log) log.era = "legacy";
     }
     return out.length ? json(200, out) : empty(202);
   }
@@ -230,6 +249,8 @@ export async function handleMcpPost(request, env, ctx, json, empty) {
     version = hdrVersion || "2025-03-26";
   }
 
+  if (log) { log.era = era; log.protocol = version || log.protocol; }
+
   // ---- notifications & stray responses ----
   if (isNotification(msg)) return empty(202);
   if (isResponse(msg)) {
@@ -252,6 +273,6 @@ export async function handleMcpPost(request, env, ctx, json, empty) {
     }
   }
 
-  const { status, body } = await dispatch(env, ctx, msg, era, version);
+  const { status, body } = await dispatch(env, ctx, msg, era, version, log);
   return json(status, body, era === "modern" ? { "mcp-protocol-version": version } : {});
 }

@@ -33,6 +33,7 @@ Until the `indexagentica.com` zone is on Cloudflare, a deployment is reachable a
 | GET | `/content?type=` | Published long-form items (metadata) |
 | GET | `/categories` | Categories with counts |
 | GET | `/openapi.json` | OpenAPI 3.1 for the REST API |
+| GET | `/.well-known/mcp/server-card.json` | Static server card (Smithery scan fallback): `serverInfo`, `authentication: {required: false}`, the same `tools` as `tools/list`, empty `resources`/`prompts` |
 | GET | `/health` | Liveness (not rate limited) |
 
 Errors are always JSON: `{"error":{"status":400,"code":"bad_request","message":"..."}}`
@@ -89,6 +90,40 @@ fetches `/api/longform/<route>/<id>.json` on demand (same cache), always from
 on a custom domain; a no-op on workers.dev), coalesces concurrent refreshes, and
 serves the stale copy if the upstream fetch fails. New categories added by the site
 build appear automatically. Nothing is written anywhere.
+
+## Usage logging (Workers Analytics Engine)
+
+Each request (except `OPTIONS`, `/health`, `/robots.txt`, `/favicon.ico`) writes one data point to the
+Analytics Engine dataset **`indexagentica_mcp`** (binding `ANALYTICS` in `wrangler.toml`), so we can count
+agent usage per tool and client. If the binding is missing (local tests, the `ratelimit-test` env),
+logging is a no-op, and a failing write never affects the response. Workers Free includes
+100,000 data points written per day ([pricing](https://developers.cloudflare.com/analytics/analytics-engine/pricing/));
+data is kept for 3 months ([limits](https://developers.cloudflare.com/analytics/analytics-engine/limits/)).
+
+| Column | Field | Notes |
+| --- | --- | --- |
+| `index1` | `<route>:<tool or method or endpoint>` | e.g. `mcp:search`, `rest:get_entry` |
+| `blob1` | route | `mcp` or `rest` |
+| `blob2` | endpoint | normalized: `/mcp`, `/search`, `/entries/{id}`, `/content/{type}/{id}`, ..., `other` |
+| `blob3` | JSON-RPC method | `initialize`, `tools/call`, `batch`, ... (MCP only) |
+| `blob4` | tool | MCP tool name, or the REST equivalent (`search`, `get_entry`, `get_content`, `list_content`, `list_categories`) |
+| `blob5`, `blob6` | client name, version | from `initialize` `clientInfo` or 2026-07-28 `_meta["io.modelcontextprotocol/clientInfo"]`; truncated to 64/32 chars |
+| `blob7` | User-Agent | truncated to 128 chars |
+| `blob8`, `blob9` | protocol version, era | `modern` / `legacy` |
+| `blob10` | outcome | `ok`, `error` (HTTP ≥ 400, JSON-RPC error or `isError` tool result), `rate_limited` |
+| `blob11` | detail | JSON-RPC error code, `tool_error`, or HTTP status |
+| `blob12`, `blob13` | country, colo | from `request.cf` |
+| `blob14`, `blob15`, `blob16` | type filter, category filter, target id | only kebab-case values (public catalog slugs/ids); anything else is stored as `invalid` |
+| `double1` | HTTP status | |
+| `double2` | latency (ms) | wall time inside the Worker (Workers clocks advance on I/O) |
+| `double3` | ASN | from `request.cf.asn` (network, not person) |
+| `double4` | result count | search `total` |
+| `double5`, `double6` | query length in characters, words | |
+
+**Privacy:** no IP addresses, no search query text, no free-text tool arguments, no cookies or
+tokens (the server has none). Clients are identified only by their self-reported name/version and a
+truncated User-Agent. Example query (SQL API):
+`SELECT blob4 AS tool, blob5 AS client, SUM(_sample_interval) AS requests FROM indexagentica_mcp WHERE timestamp > NOW() - INTERVAL '1' DAY GROUP BY tool, client ORDER BY requests DESC`.
 
 ## Rate limiting
 
@@ -187,6 +222,7 @@ src/search.js     scoring / filtering
 src/data.js       fetch + cache of /api/index.json
 src/ratelimit.js  Workers rate limiting binding + in-isolate fallback
 src/openapi.js    OpenAPI document for the REST API
+src/analytics.js  per-request usage logging to Workers Analytics Engine (no-op without the binding)
 test/             unit tests, E2E script, Inspector config
 docs/             proposed copy for llms.txt, /agents and the directory listing
 ```

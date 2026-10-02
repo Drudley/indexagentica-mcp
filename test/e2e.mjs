@@ -168,6 +168,12 @@ await check("GET /content/{type}/{id} + MCP get_content", async () => {
   console.log(`       fetched: ${[...seen].join(", ") || "(none published)"}`);
 });
 
+await check("GET /.well-known/mcp/server-card.json", async () => {
+  const { res, body } = await get("/.well-known/mcp/server-card.json");
+  assert(res.status === 200 && body.serverInfo.name === "indexagentica-mcp" && body.authentication.required === false, "card");
+  assert(["search", "get_entry", "get_content", "list_categories"].every((n) => body.tools.some((t) => t.name === n && t.inputSchema)), "tools");
+});
+
 console.log("MCP legacy era (initialize handshake, stateless)");
 await check("initialize negotiates version, no session id", async () => {
   const { res, body } = await rpcLegacy("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } }, 1, null);
