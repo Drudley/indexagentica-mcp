@@ -3,8 +3,8 @@
 **Status (2026-10-02): deployed.** The `indexagentica.com` zone is active on Cloudflare
 (option a). The Worker is live at `https://mcp.indexagentica.com/mcp` (Custom Domain) and
 `https://indexagentica-mcp.indexagentica.workers.dev/mcp`. Apex/www stay DNS-only for
-GitHub Pages. The Analytics Engine binding is commented out in `wrangler.toml` until
-Analytics Engine is enabled for the account in the dashboard (deploy failed with code 10089).
+GitHub Pages. Analytics Engine request logging (dataset `indexagentica_mcp`) is on; it was
+enabled for the account in the dashboard after a first deploy failed with code 10089.
 The research notes below are kept for reference.
 
 Researched 2026-10-02. Current DNS for `indexagentica.com` (checked via DoH):
