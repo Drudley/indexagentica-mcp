@@ -6,8 +6,18 @@ harnesses, MCP servers, tools, protocols and APIs, plus its long-form guides,
 comparisons, stacks and downloadable Agent Skills. Runs on **Cloudflare Workers
 (free plan)**, stateless, no Durable Objects, no auth, CORS open.
 
-Target URL: `https://mcp.indexagentica.com/mcp` (see [DEPLOY.md](DEPLOY.md); until
-the zone is on Cloudflare, use `https://indexagentica-mcp.<account-subdomain>.workers.dev/mcp`).
+## Install
+
+Remote server: no install, no API key. Streamable HTTP at `https://mcp.indexagentica.com/mcp`
+(**the URL once deployed**; it isn't live yet).
+
+```bash
+claude mcp add --transport http indexagentica https://mcp.indexagentica.com/mcp
+```
+
+Other clients: add the URL as a Streamable HTTP server with no auth (see [llms-install.md](llms-install.md)).
+Until the `indexagentica.com` zone is on Cloudflare, a deployment is reachable at
+`https://indexagentica-mcp.<account-subdomain>.workers.dev/mcp` (see [DEPLOY.md](DEPLOY.md)).
 
 ## Endpoints
 
@@ -178,3 +188,15 @@ docs/             proposed copy for llms.txt, /agents and the directory listing
 ```
 
 License: code MIT; directory content CC BY 4.0.
+
+## Registry metadata
+
+- [`server.json`](server.json): official MCP Registry entry (`com.indexagentica/mcp`, schema 2025-12-11), validated with
+  `mcp-publisher validate`. Publishing uses HTTP domain auth against
+  `https://indexagentica.com/.well-known/mcp-registry-auth`; it's a separate, manual step once the endpoint is live.
+- [`glama.json`](glama.json): Glama ownership claim (maintainer `Drudley`).
+- [`llms-install.md`](llms-install.md): install notes for agent-driven installers such as Cline.
+
+## License
+
+[MIT](LICENSE) for the code. Directory content served by the tools is CC BY 4.0.
