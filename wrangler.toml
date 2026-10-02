@@ -36,12 +36,10 @@ namespace_id = "4201"
 # Usage logging (src/analytics.js): one data point per request. Workers Free includes
 # 100,000 data points written per day. Environments don't inherit this binding, so
 # [env.ratelimit-test] runs without it (logging is a no-op there).
-# DISABLED for now: deploy fails with [code: 10089] "You need to enable Analytics Engine"
-# until Analytics Engine is enabled once for the account in the Cloudflare dashboard
-# (Workers & Pages > Analytics Engine). Uncomment after that and redeploy.
-# [[analytics_engine_datasets]]
-# binding = "ANALYTICS"
-# dataset = "indexagentica_mcp"
+# Analytics Engine was enabled for the account on 2026-10-02.
+[[analytics_engine_datasets]]
+binding = "ANALYTICS"
+dataset = "indexagentica_mcp"
 
 [observability]
 enabled = true
