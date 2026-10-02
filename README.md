@@ -8,16 +8,15 @@ comparisons, stacks and downloadable Agent Skills. Runs on **Cloudflare Workers
 
 ## Install
 
-Remote server: no install, no API key. Streamable HTTP at `https://mcp.indexagentica.com/mcp`
-(**the URL once deployed**; it isn't live yet).
+Remote server: no install, no API key. Streamable HTTP at `https://mcp.indexagentica.com/mcp` (live).
 
 ```bash
 claude mcp add --transport http indexagentica https://mcp.indexagentica.com/mcp
 ```
 
 Other clients: add the URL as a Streamable HTTP server with no auth (see [llms-install.md](llms-install.md)).
-Until the `indexagentica.com` zone is on Cloudflare, a deployment is reachable at
-`https://indexagentica-mcp.<account-subdomain>.workers.dev/mcp` (see [DEPLOY.md](DEPLOY.md)).
+The same Worker also answers at `https://indexagentica-mcp.indexagentica.workers.dev/mcp`
+(see [DEPLOY.md](DEPLOY.md)).
 
 ## Endpoints
 
@@ -206,9 +205,8 @@ exact Cloudflare/GoDaddy access needed. Short version:
 export CLOUDFLARE_ACCOUNT_ID=...   # from the Cloudflare dashboard
 export CLOUDFLARE_API_TOKEN=...    # custom token, permissions in DEPLOY.md
 npm run deploy:dry                 # build only
-npm run deploy                     # -> https://indexagentica-mcp.<subdomain>.workers.dev
-# after the zone is on Cloudflare: uncomment `routes` in wrangler.toml, set
-# PUBLIC_BASE_URL, and run `npm run deploy` again.
+npm run deploy                     # -> https://mcp.indexagentica.com (custom domain)
+                                   #    + https://indexagentica-mcp.indexagentica.workers.dev
 BASE=https://mcp.indexagentica.com npm run test:e2e
 ```
 

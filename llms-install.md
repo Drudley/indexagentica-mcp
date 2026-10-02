@@ -2,7 +2,7 @@
 
 This is a **remote** MCP server. There is nothing to install, build or run locally, and no API key.
 
-- URL: `https://mcp.indexagentica.com/mcp` (live once deployed; until then this URL does not resolve)
+- URL: `https://mcp.indexagentica.com/mcp`
 - Transport: Streamable HTTP (`streamable-http`)
 - Auth: none. Read-only. Rate limit: 120 requests per minute per client IP.
 - Tools: `search`, `get_entry`, `get_content`, `list_categories`
