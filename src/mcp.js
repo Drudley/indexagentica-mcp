@@ -23,8 +23,8 @@ export const SUPPORTED_VERSIONS = [...MODERN_VERSIONS, ...LEGACY_VERSIONS];
 const LIST_TTL_MS = 10 * 60 * 1000;
 
 const INSTRUCTIONS =
-  "Index Agentica (https://indexagentica.com) is an agent-first directory of skills, agent harnesses, MCP servers, tools, protocols, APIs, information sources, finance/payment rails and other directories. " +
-  "Use `search` to find resources by keywords, category and tags; `get_entry` for the full record of one id; `list_categories` for the category slugs and counts. " +
+  "Index Agentica (https://indexagentica.com) is an agent-first directory of skills, agent harnesses, MCP servers, tools, protocols, APIs, information sources, finance/payment rails and other directories, plus long-form guides, comparisons, stacks and downloadable Agent Skills. " +
+  "Use `search` to find resources by keywords, type (entry, guide, comparison, stack, skill), category and tags; `get_entry` for the full record of one directory entry; `get_content` (type + id) for a guide, comparison, stack or skill with its markdown; `list_categories` for the category slugs and counts. " +
   "Data is read-only, refreshed from the published site every ~10 minutes, and licensed CC BY 4.0. To add or correct an entry, see https://indexagentica.com/agents/#contribute.";
 
 const META_VERSION = "io.modelcontextprotocol/protocolVersion";

@@ -1,5 +1,6 @@
 // Simple, deterministic relevance scoring over name / id / tags / summary /
-// description. Designed for a few hundred to a few thousand entries.
+// description. Designed for a few hundred to a few thousand items. Covers
+// directory entries and long-form items (guides, comparisons, stacks, skills).
 
 export const DEFAULT_LIMIT = 10;
 export const MAX_LIMIT = 50;
@@ -46,10 +47,12 @@ export function normalizeTags(tags) {
 
 /**
  * @param data   result of getData()
- * @param params { query, category, tags, limit }
- * @returns { query, category, tags, limit, total, results: [...] }
+ * @param params { query, category, tags, limit, type }
+ *   type: "entry" | "guide" | "comparison" | "stack" | "skill" | "all" (default "all").
+ *   category applies to entries only, so a category filter implies type "entry".
+ * @returns { query, type, category, tags, limit, total, results: [...] }
  */
-export function search(data, { query = "", category, tags, limit } = {}) {
+export function search(data, { query = "", category, tags, limit, type } = {}) {
   const tokens = tokenize(query);
   const phrase = String(query || "").toLowerCase().trim();
   const cat = category ? String(category).trim().toLowerCase() : null;
@@ -58,8 +61,13 @@ export function search(data, { query = "", category, tags, limit } = {}) {
   if (!Number.isFinite(lim) || lim < 1) lim = DEFAULT_LIMIT;
   lim = Math.min(lim, MAX_LIMIT);
 
+  const typ = type ? String(type).trim().toLowerCase() : "all";
+  const pool = typ === "entry" || cat ? data.entries
+    : typ === "all" ? data.entries.concat(data.longform || [])
+    : (data.longform || []).filter((x) => x.type === typ);
+
   const hits = [];
-  for (const e of data.entries) {
+  for (const e of pool) {
     const s = e._s;
     if (cat && s.category !== cat) continue;
     if (wantTags.length && !wantTags.every((t) => s.tags.includes(t))) continue;
@@ -71,6 +79,7 @@ export function search(data, { query = "", category, tags, limit } = {}) {
   hits.sort((a, b) => b.score - a.score || byName(a.e._s.name, b.e._s.name));
   return {
     query: String(query || ""),
+    type: cat && typ === "all" ? "entry" : typ,
     ...(cat ? { category: cat } : {}),
     tags: wantTags,
     limit: lim,
@@ -80,7 +89,9 @@ export function search(data, { query = "", category, tags, limit } = {}) {
 }
 
 export function summarize(e, score) {
+  if (e._type && e._type !== "entry") return summarizeLongform(e, score);
   const out = {
+    type: "entry",
     id: e.id,
     name: e.name,
     category: e.category,
@@ -96,8 +107,25 @@ export function summarize(e, score) {
   return out;
 }
 
+export function summarizeLongform(x, score) {
+  const out = {
+    type: x.type,
+    id: x.id,
+    name: x.title || x.id,
+    summary: x.summary || "",
+    url: (x.links && x.links.html) || "",
+    tags: x.tags || [],
+  };
+  if (x.author) out.author = x.author;
+  if (x.last_verified) out.last_verified = x.last_verified;
+  if (x.entries && x.entries.length) out.entries = x.entries;
+  if (score !== undefined) out.score = score;
+  if (x.links) out.links = x.links;
+  return out;
+}
+
 /** Up to n ids that look like `id` (for "did you mean" on misses). */
-export function suggestIds(data, id, n = 5) {
-  const r = search(data, { query: String(id).replace(/[-_]+/g, " "), limit: n });
+export function suggestIds(data, id, n = 5, type = "entry") {
+  const r = search(data, { query: String(id).replace(/[-_]+/g, " "), limit: n, type });
   return r.results.map((x) => x.id);
 }

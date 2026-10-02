@@ -1,5 +1,5 @@
 // Tool definitions and implementations shared by MCP and REST.
-import { getData, publicEntry } from "./data.js";
+import { getData, publicEntry, getLongformItem, LONGFORM_TYPES, CONTENT_TYPES } from "./data.js";
 import { search, suggestIds, DEFAULT_LIMIT, MAX_LIMIT, summarize } from "./search.js";
 
 const ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -15,19 +15,23 @@ export class NotFoundError extends Error {
 const entrySummarySchema = {
   type: "object",
   properties: {
+    type: { type: "string", enum: CONTENT_TYPES, description: "entry (directory entry) or a long-form type: guide, comparison, stack, skill." },
     id: { type: "string" },
     name: { type: "string" },
-    category: { type: "string" },
+    category: { type: "string", description: "Entries only." },
     summary: { type: "string" },
     url: { type: "string" },
     tags: { type: "array", items: { type: "string" } },
+    author: { type: "string", description: "Long-form only." },
+    last_verified: { type: "string", description: "Long-form only." },
+    entries: { type: "array", items: { type: "string" }, description: "Long-form only: directory entry ids it references." },
     status: { type: "string" },
     pricing: { type: "string" },
     mcp_endpoint: { type: "string" },
     score: { type: "number" },
     links: { type: "object" },
   },
-  required: ["id", "name", "category", "summary", "url"],
+  required: ["type", "id", "name", "summary", "url"],
 };
 
 export function toolDefinitions(categorySlugs = []) {
@@ -39,10 +43,11 @@ export function toolDefinitions(categorySlugs = []) {
       name: "search",
       title: "Search Index Agentica",
       description:
-        "Search the Index Agentica directory of agent-usable resources (skills, harnesses, MCP servers, tools, protocols, APIs, information sources, finance/payments, directories). " +
-        "Matches the query words against each entry's name, id, tags, summary and description and returns the best matches first, with a relevance score and links to the full entry (HTML, markdown, JSON). " +
-        "Optionally filter by category and/or tags (an entry must have ALL given tags). An empty query with a filter lists everything in that filter. " +
-        "Use get_entry with a returned id for full details.",
+        "Search Index Agentica: the directory of agent-usable resources (skills, harnesses, MCP servers, tools, protocols, APIs, information sources, finance/payments, directories) " +
+        "plus its long-form content (guides, comparisons, stacks and downloadable Agent Skills). " +
+        "Matches the query words against name/title, id, tags, summary and description and returns the best matches first, each with its type, a relevance score and links (HTML, markdown, JSON). " +
+        "Optionally filter by type (entry, guide, comparison, stack, skill; default all), category (entries only) and/or tags (ALL given tags must match). An empty query with a filter lists everything in that filter. " +
+        "For full details use get_entry for type entry, or get_content with the type and id for long-form items.",
       inputSchema: {
         type: "object",
         properties: {
@@ -51,9 +56,15 @@ export function toolDefinitions(categorySlugs = []) {
             maxLength: 200,
             description: "Free-text search words, e.g. \"browser automation\" or \"payments x402\". May be empty when category or tags are given.",
           },
+          type: {
+            type: "string",
+            enum: [...CONTENT_TYPES, "all"],
+            default: "all",
+            description: "Optional result type: entry (directory entries), guide, comparison, stack, skill, or all (default).",
+          },
           category: {
             type: "string",
-            description: "Optional category slug to restrict results to." + catHint,
+            description: "Optional entry category slug to restrict results to (implies type entry)." + catHint,
           },
           tags: {
             type: "array",
@@ -75,10 +86,11 @@ export function toolDefinitions(categorySlugs = []) {
         type: "object",
         properties: {
           query: { type: "string" },
+          type: { type: "string", description: "Type filter applied (all when none)." },
           category: { type: "string", description: "Category filter applied (omitted when none)." },
           tags: { type: "array", items: { type: "string" } },
           limit: { type: "integer" },
-          total: { type: "integer", description: "Number of matching entries before the limit was applied." },
+          total: { type: "integer", description: "Number of matches before the limit was applied." },
           results: { type: "array", items: entrySummarySchema },
         },
         required: ["query", "total", "results"],
@@ -105,6 +117,37 @@ export function toolDefinitions(categorySlugs = []) {
         required: ["entry"],
       },
       annotations: { title: "Get directory entry", readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    {
+      name: "get_content",
+      title: "Get guide, comparison, stack or skill",
+      description:
+        "Fetch one Index Agentica long-form item by type and id (as returned by search). Returns its metadata (title, summary, author, tags, dates, referenced entries with links, related items, sources, links) " +
+        "and its markdown (scheme links resolved to absolute URLs). Comparisons include the structured table (criteria, one row per entry, verdict); stacks include the use case and components; " +
+        "skills include the full SKILL.md (skill_md) plus download links (links.zip, links.skill_md). Unknown ids return an error with suggestions.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          type: { type: "string", enum: LONGFORM_TYPES, description: "guide, comparison, stack or skill." },
+          id: { type: "string", pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength: 80, description: "Item id (kebab-case slug) as returned by search." },
+          include_html: { type: "boolean", default: false, description: "Also return the rendered HTML body." },
+        },
+        required: ["type", "id"],
+        additionalProperties: false,
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          content: {
+            type: "object",
+            description: "The item: front_matter, markdown, links and type-specific fields (comparison, stack, skill_md). See https://indexagentica.com/openapi.json (LongformItem).",
+            properties: { type: { type: "string" }, id: { type: "string" }, title: { type: "string" }, markdown: { type: "string" }, links: { type: "object" } },
+            required: ["type", "id", "title", "markdown"],
+          },
+        },
+        required: ["content"],
+      },
+      annotations: { title: "Get guide, comparison, stack or skill", readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
     },
     {
       name: "list_categories",
@@ -145,7 +188,12 @@ export function toolDefinitions(categorySlugs = []) {
 export async function runSearch(env, ctx, args = {}) {
   if (args === null || typeof args !== "object" || Array.isArray(args)) throw new ToolInputError("arguments must be an object");
   const { query = "", category, tags, limit } = args;
+  const type = args.type == null || args.type === "" ? "all" : args.type;
   if (typeof query !== "string") throw new ToolInputError("query must be a string");
+  if (typeof type !== "string" || ![...CONTENT_TYPES, "all"].includes(type.trim().toLowerCase()))
+    throw new ToolInputError(`type must be one of: ${[...CONTENT_TYPES, "all"].join(", ")}`);
+  const typ = type.trim().toLowerCase();
+  if (category && typ !== "all" && typ !== "entry") throw new ToolInputError("category applies to directory entries only; use it with type entry (or omit type)");
   if (query.length > 200) throw new ToolInputError("query must be at most 200 characters");
   if (category != null && typeof category !== "string") throw new ToolInputError("category must be a string");
   if (tags != null && !(Array.isArray(tags) && tags.every((t) => typeof t === "string"))) throw new ToolInputError("tags must be an array of strings");
@@ -156,10 +204,10 @@ export async function runSearch(env, ctx, args = {}) {
   if (category && !data.categories.some((c) => c.slug === category.trim().toLowerCase())) {
     throw new ToolInputError(`unknown category "${category}". Valid: ${data.categories.map((c) => c.slug).join(", ")}`);
   }
-  if (!query.trim() && !category && !(tags && tags.length)) {
-    throw new ToolInputError("provide a query, a category or tags");
+  if (!query.trim() && !category && !(tags && tags.length) && typ === "all") {
+    throw new ToolInputError("provide a query, a type, a category or tags");
   }
-  return search(data, { query, category, tags, limit });
+  return search(data, { query, category, tags, limit, type: typ });
 }
 
 export async function runGetEntry(env, ctx, args = {}) {
@@ -172,6 +220,40 @@ export async function runGetEntry(env, ctx, args = {}) {
     throw new NotFoundError(`no entry with id "${id}"`, { suggestions });
   }
   return { entry: publicEntry(e) };
+}
+
+export async function runGetContent(env, ctx, args = {}) {
+  if (args === null || typeof args !== "object" || Array.isArray(args)) throw new ToolInputError("arguments must be an object");
+  const type = typeof args.type === "string" ? args.type.trim().toLowerCase() : null;
+  if (!type || !LONGFORM_TYPES.includes(type)) {
+    throw new ToolInputError(`type is required: one of ${LONGFORM_TYPES.join(", ")}${type === "entry" ? " (use get_entry for directory entries)" : ""}`);
+  }
+  const id = typeof args.id === "string" ? args.id.trim().toLowerCase() : null;
+  if (!id) throw new ToolInputError("id is required (string)");
+  if (args.include_html != null && typeof args.include_html !== "boolean") throw new ToolInputError("include_html must be a boolean");
+  const data = await getData(env, ctx);
+  const item = ID_RE.test(id) ? data.longformByKey.get(`${type}:${id}`) : undefined;
+  if (!item) {
+    const other = ID_RE.test(id) ? data.longform.find((x) => x.id === id) : undefined;
+    const suggestions = suggestIds(data, id, 5, type);
+    throw new NotFoundError(
+      other ? `no ${type} with id "${id}"; it is a ${other.type}` : `no published ${type} with id "${id}"`,
+      { suggestions, ...(other ? { type: other.type } : {}) },
+    );
+  }
+  let full;
+  try {
+    full = await getLongformItem(env, ctx, item);
+  } catch (err) {
+    if (err && err.status === 404) throw new NotFoundError(`${type} "${id}" is no longer published`, { suggestions: [] });
+    throw err;
+  }
+  const { html, raw, ...rest } = full || {};
+  const content = { ...rest };
+  if (type === "skill" && raw) content.skill_md = raw;
+  if (args.include_html && html) content.html = html;
+  if (typeof content.markdown !== "string") content.markdown = "";
+  return { content };
 }
 
 export async function runListCategories(env, ctx) {
@@ -192,6 +274,7 @@ export async function runListCategories(env, ctx) {
 export const TOOL_IMPLS = {
   search: runSearch,
   get_entry: runGetEntry,
+  get_content: runGetContent,
   list_categories: runListCategories,
 };
 

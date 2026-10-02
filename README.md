@@ -2,7 +2,8 @@
 
 Read-only **remote MCP server** (Streamable HTTP) and **REST search API** for
 [Index Agentica](https://indexagentica.com), the agent-first directory of skills,
-harnesses, MCP servers, tools, protocols and APIs. Runs on **Cloudflare Workers
+harnesses, MCP servers, tools, protocols and APIs, plus its long-form guides,
+comparisons, stacks and downloadable Agent Skills. Runs on **Cloudflare Workers
 (free plan)**, stateless, no Durable Objects, no auth, CORS open.
 
 Target URL: `https://mcp.indexagentica.com/mcp` (see [DEPLOY.md](DEPLOY.md); until
@@ -15,9 +16,11 @@ the zone is on Cloudflare, use `https://indexagentica-mcp.<account-subdomain>.wo
 | POST | `/mcp` | MCP Streamable HTTP endpoint (JSON-RPC 2.0, JSON responses) |
 | GET/DELETE | `/mcp` | `405` (no standalone SSE stream, no sessions) |
 | GET | `/` | JSON self-description with links to the MCP endpoint, REST, llms.txt, docs |
-| GET | `/search?q=&category=&tags=a,b&limit=` | Ranked search (limit 1-50, default 10; tags are AND-ed) |
+| GET | `/search?q=&type=&category=&tags=a,b&limit=` | Ranked search over entries and long-form (`type`: `entry`, `guide`, `comparison`, `stack`, `skill` or `all` (default); `category` applies to entries; limit 1-50, default 10; tags are AND-ed) |
 | GET | `/entries/<id>` (or `<id>.json`) | One full entry; `404` includes `suggestions` |
 | GET | `/entries` | All ids |
+| GET | `/content/<type>/<id>` (or `<id>.json`) | One guide, comparison, stack or skill: metadata + markdown (`?include_html=1` adds HTML); `404` includes `suggestions` |
+| GET | `/content?type=` | Published long-form items (metadata) |
 | GET | `/categories` | Categories with counts |
 | GET | `/openapi.json` | OpenAPI 3.1 for the REST API |
 | GET | `/health` | Liveness (not rate limited) |
@@ -29,8 +32,9 @@ Errors are always JSON: `{"error":{"status":400,"code":"bad_request","message":"
 
 | Tool | Input | Output (`structuredContent`) |
 | --- | --- | --- |
-| `search` | `query` (string), `category?` (slug), `tags?` (string[], all must match), `limit?` (1-50) | `{query, category?, tags, limit, total, results[]}`; each result has `id, name, category, summary, url, tags, score, links` |
-| `get_entry` | `id` (kebab-case) | `{entry}` (the full entry per the [entry schema](https://indexagentica.com/schema/entry.schema.json) + `links`) |
+| `search` | `query` (string), `type?` (`entry`\|`guide`\|`comparison`\|`stack`\|`skill`\|`all`, default all), `category?` (slug; entries only), `tags?` (string[], all must match), `limit?` (1-50) | `{query, type, category?, tags, limit, total, results[]}`; each result has `type, id, name, summary, url, tags, score, links`, plus `category` (entries) or `author, last_verified, entries` (long-form) |
+| `get_entry` | `id` (kebab-case) | `{entry}` (the full entry per the [entry schema](https://indexagentica.com/schema/entry.schema.json) + `links` + `longform` back-references) |
+| `get_content` | `type` (`guide`\|`comparison`\|`stack`\|`skill`), `id`, `include_html?` | `{content}`: front matter, metadata, `markdown` (scheme links resolved to absolute URLs), `links`; comparisons add `comparison` (criteria, table, verdict), stacks add `stack` (use case, components), skills add `skill_md` (full SKILL.md) and `links.zip` / `links.skill_md` |
 | `list_categories` | none | `{total, generated, categories[{slug,name,description,count,html,json}]}` |
 
 Every tool has a JSON-Schema `inputSchema`, an `outputSchema`, `readOnlyHint`
@@ -67,7 +71,10 @@ Spec refs: [Streamable HTTP 2026-07-28](https://modelcontextprotocol.io/specific
 ## Data & caching
 
 Source of truth is the published static site: `GET https://indexagentica.com/api/index.json`
-(all entries + categories). The Worker keeps it in isolate memory for
+(all entries + categories) and `GET /api/longform.json` (long-form metadata), fetched
+together; if the long-form index can't be loaded, entries keep working. `get_content`
+fetches `/api/longform/<route>/<id>.json` on demand (same cache), always from
+`DATA_BASE_URL`. The Worker keeps the indexes in isolate memory for
 `CACHE_TTL_SECONDS` (600 s), also stores it in the Cloudflare Cache API (effective
 on a custom domain; a no-op on workers.dev), coalesces concurrent refreshes, and
 serves the stale copy if the upstream fetch fails. New categories added by the site
@@ -96,7 +103,14 @@ npm run dev                  # wrangler dev on http://127.0.0.1:8787 (no Cloudfl
 npm test                     # unit tests + 2x wrangler dev + E2E (REST, MCP both eras, rate limit) + MCP Inspector CLI
 npm run test:unit            # pure unit tests (no network)
 BASE=https://<deployed-host> npm run test:e2e   # E2E against any deployment
+DATA_BASE_URL=http://127.0.0.1:8089 npm test   # point the local Workers at another copy of the site
 ```
+
+The long-form E2E checks adapt to the data: with published items they fetch one of
+each type over REST and MCP; with none (all drafts) they check the empty listings and
+not-found paths. To exercise the full path before anything is published, build the
+site with drafts published (e.g. `INCLUDE_DRAFTS=1 SITE_URL=http://127.0.0.1:8089 node scripts/build.mjs`
+in the site repo), serve `dist/` on that port, and run `npm test` with `DATA_BASE_URL` set.
 
 `scripts/test-local.sh` starts the normal Worker on :8797 and a low-limit copy
 (`--env ratelimit-test`, 5 req / 10 s) on :8798, runs `test/e2e.mjs`, then checks

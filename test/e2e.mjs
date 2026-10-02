@@ -116,6 +116,58 @@ await check("GET /openapi.json", async () => {
   assert(res.status === 200 && body.openapi === "3.1.0" && body.paths["/search"], "openapi");
 });
 
+console.log("Long-form (guides, comparisons, stacks, skills)");
+// Works against any data: with published long-form items it fetches one of each listed type;
+// with none it checks the empty listings and the not-found paths.
+const lfList = await get("/content");
+const lfItems = (lfList.body && lfList.body.items) || [];
+console.log(`       ${lfItems.length} published long-form item(s) upstream`);
+await check("GET /content (+ type filter, bad type -> 400)", async () => {
+  assert(lfList.res.status === 200 && Array.isArray(lfList.body.items) && lfList.body.total === lfItems.length, "list");
+  for (const t of ["guide", "comparison", "stack", "skill"]) {
+    const r = await get(`/content?type=${t}`);
+    assert(r.res.status === 200 && r.body.items.every((x) => x.type === t), `type ${t}`);
+  }
+  assert((await get("/content?type=video")).res.status === 400, "bad type");
+});
+await check("GET /search type filter", async () => {
+  const e = await get("/search?q=mcp&type=entry&limit=20");
+  assert(e.res.status === 200 && e.body.type === "entry" && e.body.results.every((r) => r.type === "entry"), "type=entry");
+  for (const t of ["guide", "comparison", "stack", "skill"]) {
+    const r = await get(`/search?type=${t}&limit=50`);
+    assert(r.res.status === 200 && r.body.results.every((x) => x.type === t) && r.body.total === lfItems.filter((x) => x.type === t).length, `type=${t}`);
+  }
+  const all = await get("/search?q=mcp&limit=50");
+  assert(all.body.type === "all" && all.body.results.length > 0, "default all");
+  assert((await get("/search?q=x&type=video")).res.status === 400, "bad type");
+  assert((await get("/search?q=x&type=guide&category=apis")).res.status === 400, "category with long-form type");
+});
+await check("GET /content/{type}/{id} + MCP get_content", async () => {
+  const seen = new Set();
+  for (const x of lfItems) {
+    if (seen.has(x.type)) continue;
+    seen.add(x.type);
+    const r = await get(`/content/${x.type}/${x.id}`);
+    assert(r.res.status === 200 && r.body.id === x.id && r.body.type === x.type && typeof r.body.markdown === "string" && r.body.markdown.length > 0, `REST ${x.type}/${x.id}`);
+    assert(r.body.html === undefined && r.body.raw === undefined, "no html/raw by default");
+    if (x.type === "skill") assert(/^---\n/.test(r.body.skill_md) && r.body.links.zip, "skill_md + zip link");
+    if (x.type === "comparison") assert(r.body.comparison && r.body.comparison.table.length >= 2, "comparison table");
+    if (x.type === "stack") assert(r.body.stack && r.body.stack.components.length >= 1, "stack components");
+    const h = await get(`/content/${x.type}/${x.id}?include_html=1`);
+    assert(typeof h.body.html === "string", "include_html");
+    const m = await rpcLegacy("tools/call", { name: "get_content", arguments: { type: x.type, id: x.id } }, 30);
+    assert(!m.body.result.isError && m.body.result.structuredContent.content.id === x.id, `MCP ${x.type}/${x.id}`);
+    const s = await rpcLegacy("tools/call", { name: "search", arguments: { query: x.title, type: x.type, limit: 5 } }, 31);
+    assert(s.body.result.structuredContent.results.some((y) => y.id === x.id), `search finds ${x.id}`);
+  }
+  const nf = await get("/content/guide/nope-nope");
+  assert(nf.res.status === 404 && Array.isArray(nf.body.error.suggestions), "unknown id -> 404 + suggestions");
+  assert((await get("/content/entry/x402")).res.status === 400, "entry type -> 400 (use /entries)");
+  const bad = await rpcLegacy("tools/call", { name: "get_content", arguments: { type: "guide", id: "nope-nope" } }, 32);
+  assert(bad.body.result.isError, "MCP unknown -> isError");
+  console.log(`       fetched: ${[...seen].join(", ") || "(none published)"}`);
+});
+
 console.log("MCP legacy era (initialize handshake, stateless)");
 await check("initialize negotiates version, no session id", async () => {
   const { res, body } = await rpcLegacy("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } }, 1, null);
@@ -137,7 +189,7 @@ await check("ping", async () => {
 await check("tools/list", async () => {
   const { body } = await rpcLegacy("tools/list", undefined, 4);
   const names = body.result.tools.map((t) => t.name);
-  assert(["search", "get_entry", "list_categories"].every((n) => names.includes(n)), names.join(","));
+  assert(["search", "get_entry", "get_content", "list_categories"].every((n) => names.includes(n)), names.join(","));
   assert(body.result.tools.every((t) => t.inputSchema.type === "object" && t.outputSchema && t.annotations.readOnlyHint), "schemas");
 });
 await check("tools/call search", async () => {
@@ -190,7 +242,7 @@ await check("server/discover", async () => {
 });
 await check("tools/list has caching hints", async () => {
   const { body } = await rpcModern("tools/list");
-  assert(body.result.tools.length === 3 && body.result.ttlMs > 0 && body.result.cacheScope === "public", "tools + ttl");
+  assert(body.result.tools.length === 4 && body.result.ttlMs > 0 && body.result.cacheScope === "public", "tools + ttl");
 });
 await check("tools/call search / get_entry / list_categories", async () => {
   const s = await rpcModern("tools/call", { name: "search", arguments: { query: "mcp", category: "mcp-servers", limit: 5 } });

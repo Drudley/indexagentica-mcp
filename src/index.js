@@ -1,6 +1,7 @@
 // Index Agentica MCP + REST Worker.
 import { handleMcpPost, SERVER_INFO, SUPPORTED_VERSIONS } from "./mcp.js";
-import { runSearch, runGetEntry, runListCategories, toolDefinitions, ToolInputError, NotFoundError } from "./tools.js";
+import { runSearch, runGetEntry, runGetContent, runListCategories, toolDefinitions, ToolInputError, NotFoundError } from "./tools.js";
+import { summarizeLongform } from "./search.js";
 import { checkRateLimit } from "./ratelimit.js";
 import { getData } from "./data.js";
 import { openapi } from "./openapi.js";
@@ -44,7 +45,7 @@ function landing(request, env) {
   return {
     name: "Index Agentica MCP & search API",
     description:
-      "Read-only remote MCP server and REST search API for Index Agentica, an agent-first directory of skills, harnesses, MCP servers, tools, protocols and APIs. No auth. CORS open.",
+      "Read-only remote MCP server and REST search API for Index Agentica, an agent-first directory of skills, harnesses, MCP servers, tools, protocols and APIs, plus guides, comparisons, stacks and downloadable skills. No auth. CORS open.",
     version: SERVER_INFO.version,
     mcp: {
       endpoint: `${base}/mcp`,
@@ -54,8 +55,10 @@ function landing(request, env) {
       notes: "Stateless: POST JSON-RPC to /mcp. Works with the 2026-07-28 per-request _meta model and with the legacy initialize handshake (no session id is issued). GET /mcp returns 405.",
     },
     rest: {
-      search: `${base}/search?q={query}&category={slug}&tags={a,b}&limit={1-50}`,
+      search: `${base}/search?q={query}&type={entry|guide|comparison|stack|skill|all}&category={slug}&tags={a,b}&limit={1-50}`,
       entry: `${base}/entries/{id}`,
+      content: `${base}/content/{type}/{id}`,
+      content_list: `${base}/content?type={guide|comparison|stack|skill}`,
       categories: `${base}/categories`,
       openapi: `${base}/openapi.json`,
     },
@@ -69,6 +72,7 @@ function landing(request, env) {
       llms_txt: `${site}/llms.txt`,
       agents: `${site}/agents/`,
       api_index: `${site}/api/index.json`,
+      api_longform: `${site}/api/longform.json`,
       schema: `${site}/schema/entry.schema.json`,
       repository: "https://github.com/Drudley/indexagentica",
       contribute: `${site}/agents/#contribute`,
@@ -141,11 +145,28 @@ export default {
       const tagsParam = url.searchParams.getAll("tags").concat(url.searchParams.getAll("tag")).join(",");
       const tags = tagsParam ? tagsParam.split(",").map((t) => t.trim()).filter(Boolean) : undefined;
       const limitParam = url.searchParams.get("limit");
-      return withRl(rest(() => runSearch(env, ctx, { query: q, category, tags, limit: limitParam == null || limitParam === "" ? undefined : Number(limitParam) })));
+      const type = url.searchParams.get("type") || undefined;
+      return withRl(rest(() => runSearch(env, ctx, { query: q, type, category, tags, limit: limitParam == null || limitParam === "" ? undefined : Number(limitParam) })));
     }
 
     const m = /^\/entries\/([^/]+?)(?:\.json)?$/.exec(path);
     if (m) return withRl(rest(async () => (await runGetEntry(env, ctx, { id: decodeURIComponent(m[1]) })).entry));
+
+    const c = /^\/content\/([^/]+)\/([^/]+?)(?:\.json)?$/.exec(path);
+    if (c) {
+      const includeHtml = ["1", "true"].includes(url.searchParams.get("include_html") || "");
+      return withRl(rest(async () => (await runGetContent(env, ctx, { type: decodeURIComponent(c[1]), id: decodeURIComponent(c[2]), include_html: includeHtml })).content));
+    }
+
+    if (path === "/content") {
+      return withRl(rest(async () => {
+        const type = url.searchParams.get("type");
+        if (type && !["guide", "comparison", "stack", "skill"].includes(type)) throw new ToolInputError("type must be one of: guide, comparison, stack, skill");
+        const d = await getData(env, ctx);
+        const items = d.longform.filter((x) => !type || x.type === type).map((x) => summarizeLongform(x));
+        return { ...(type ? { type } : {}), total: items.length, generated: d.longformGenerated, items };
+      }));
+    }
 
     if (path === "/categories") return withRl(rest(() => runListCategories(env, ctx)));
 
