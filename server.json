@@ -5,6 +5,22 @@
   "description": "Search a curated directory of agent tools, MCP servers, APIs, protocols and skills. No auth.",
   "version": "0.1.0",
   "websiteUrl": "https://indexagentica.com/agents/",
+  "icons": [
+    {
+      "src": "https://indexagentica.com/logo-512.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "512x512"
+      ]
+    },
+    {
+      "src": "https://indexagentica.com/favicon.svg",
+      "mimeType": "image/svg+xml",
+      "sizes": [
+        "any"
+      ]
+    }
+  ],
   "repository": {
     "url": "https://github.com/Drudley/indexagentica-mcp",
     "source": "github",
