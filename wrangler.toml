@@ -2,16 +2,17 @@
 name = "indexagentica-mcp"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
+account_id = "ab100e144ef0d4c54ae8e2d4e099b287"
 
-# Free *.workers.dev URL: https://indexagentica-mcp.<account-subdomain>.workers.dev
+# Free *.workers.dev URL: https://indexagentica-mcp.indexagentica.workers.dev
 workers_dev = true
 
-# --- Custom domain (requires the indexagentica.com zone to be ON Cloudflare) ---
-# Uncomment once the zone is active on Cloudflare. Wrangler then creates the
-# DNS record + certificate for mcp.indexagentica.com automatically.
-# routes = [
-#   { pattern = "mcp.indexagentica.com", custom_domain = true }
-# ]
+# --- Custom domain (the indexagentica.com zone is active on Cloudflare) ---
+# Wrangler creates the DNS record + certificate for mcp.indexagentica.com.
+# Only this hostname is attached; apex/www stay DNS-only for GitHub Pages.
+routes = [
+  { pattern = "mcp.indexagentica.com", custom_domain = true }
+]
 
 [vars]
 DATA_BASE_URL = "https://indexagentica.com"
@@ -20,8 +21,8 @@ CACHE_TTL_SECONDS = "600"
 RATE_LIMIT_REQUESTS = "120"
 RATE_LIMIT_PERIOD_SECONDS = "60"
 ALLOWED_ORIGINS = "*"
-# Set to the public URL once deployed so links in GET / are canonical, e.g.
-# PUBLIC_BASE_URL = "https://mcp.indexagentica.com"
+# Public URL so links in GET / are canonical.
+PUBLIC_BASE_URL = "https://mcp.indexagentica.com"
 
 # Workers Rate Limiting binding (per key, per Cloudflare location).
 # namespace_id is any positive integer unique within the Cloudflare account.
@@ -35,9 +36,12 @@ namespace_id = "4201"
 # Usage logging (src/analytics.js): one data point per request. Workers Free includes
 # 100,000 data points written per day. Environments don't inherit this binding, so
 # [env.ratelimit-test] runs without it (logging is a no-op there).
-[[analytics_engine_datasets]]
-binding = "ANALYTICS"
-dataset = "indexagentica_mcp"
+# DISABLED for now: deploy fails with [code: 10089] "You need to enable Analytics Engine"
+# until Analytics Engine is enabled once for the account in the Cloudflare dashboard
+# (Workers & Pages > Analytics Engine). Uncomment after that and redeploy.
+# [[analytics_engine_datasets]]
+# binding = "ANALYTICS"
+# dataset = "indexagentica_mcp"
 
 [observability]
 enabled = true
