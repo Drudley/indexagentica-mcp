@@ -1,0 +1,32 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "com.indexagentica/mcp",
+  "title": "Index Agentica",
+  "description": "Search a curated directory of agent tools, MCP servers, APIs, protocols and skills. No auth.",
+  "version": "0.1.0",
+  "websiteUrl": "https://indexagentica.com/agents/",
+  "repository": {
+    "url": "https://github.com/Drudley/indexagentica-mcp",
+    "source": "github",
+    "id": "1402134828"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.indexagentica.com/mcp"
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "tools": [
+        "search",
+        "get_entry",
+        "get_content",
+        "list_categories"
+      ],
+      "auth": "none",
+      "rateLimit": "120 requests/min per IP",
+      "llmsTxt": "https://indexagentica.com/llms.txt"
+    }
+  }
+}
