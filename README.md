@@ -144,9 +144,13 @@ curl -s http://127.0.0.1:8787/mcp -H 'content-type: application/json' \
 claude mcp add --transport http indexagentica https://mcp.indexagentica.com/mcp
 ```
 
+JSON config (e.g. Claude Code's `.mcp.json`; Claude Code requires `"type": "http"` for remote servers):
+
 ```json
-{ "mcpServers": { "indexagentica": { "url": "https://mcp.indexagentica.com/mcp" } } }
+{ "mcpServers": { "indexagentica": { "type": "http", "url": "https://mcp.indexagentica.com/mcp" } } }
 ```
+
+Other clients use their own name for Streamable HTTP (Cline: `"type": "streamableHttp"`; some accept just `"url"`).
 
 ## Configuration (`wrangler.toml` `[vars]`)
 

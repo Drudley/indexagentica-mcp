@@ -13,19 +13,19 @@ Claude Code:
 claude mcp add --transport http indexagentica https://mcp.indexagentica.com/mcp
 ```
 
-Generic MCP client configuration (Cline, Cursor and others that accept remote servers):
+JSON configuration (Claude Code `.mcp.json`, which requires `"type": "http"`):
 
 ```json
 {
   "mcpServers": {
     "indexagentica": {
-      "type": "streamableHttp",
+      "type": "http",
       "url": "https://mcp.indexagentica.com/mcp"
     }
   }
 }
 ```
 
-Some clients spell the transport key differently (`"type": "http"` or `"transport": "streamable-http"`); use your client's name for Streamable HTTP. No `command`, `args` or `env` are needed.
+Cline (`cline_mcp_settings.json`) uses `"type": "streamableHttp"` with the same `url`; other clients use their own name for Streamable HTTP. No `command`, `args` or `env` are needed.
 
 To check it works, call `search` with `{"query": "browser automation"}`.
