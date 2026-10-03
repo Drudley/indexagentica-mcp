@@ -6,6 +6,9 @@ import { checkRateLimit } from "./ratelimit.js";
 import { getData } from "./data.js";
 import { openapi } from "./openapi.js";
 import { newLog, noteArgs, writeLog } from "./analytics.js";
+import { handleHit } from "./hits.js";
+import { statsResponse, rollup, CACHE_SECONDS } from "./stats.js";
+import { uaClass } from "./ua.js";
 
 const CORS = {
   "access-control-allow-origin": "*",
@@ -86,6 +89,7 @@ function landing(request, env) {
       categories: `${base}/categories`,
       openapi: `${base}/openapi.json`,
       server_card: `${base}/.well-known/mcp/server-card.json`,
+      stats: `${base}/stats`,
     },
     rate_limit: {
       requests: Number(env.RATE_LIMIT_REQUESTS) || 120,
@@ -120,8 +124,9 @@ export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
-    // One Analytics Engine data point per request, except preflights and unmetered housekeeping.
-    const skip = request.method.toUpperCase() === "OPTIONS" || ["/health", "/favicon.ico", "/robots.txt"].includes(path);
+    // One Analytics Engine data point per request, except preflights, unmetered housekeeping,
+    // site beacons (/hit, logged to their own dataset) and /stats (fetched by every site footer).
+    const skip = request.method.toUpperCase() === "OPTIONS" || ["/health", "/favicon.ico", "/robots.txt", "/hit", "/stats"].includes(path);
     const log = skip ? null : newLog(request, path);
     const res = await handle(request, env, ctx, url, path, log);
     if (log) {
@@ -129,6 +134,11 @@ export default {
       writeLog(env, request, log, res.status);
     }
     return res;
+  },
+
+  // Daily cron ([triggers] in wrangler.toml): store yesterday's totals in KV for the all-time figure.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(rollup(env, uaClass, { maxDays: 100 }).catch((err) => console.error("stats rollup failed", err && err.message)));
   },
 };
 
@@ -147,6 +157,22 @@ async function handle(request, env, ctx, url, path, log) {
       return path === "/robots.txt"
         ? new Response("User-agent: *\nAllow: /\n", { headers: { "content-type": "text/plain", ...CORS } })
         : empty(404);
+    }
+
+    // Site beacons and public stats: own rate-limit counters, no request log in the API dataset.
+    if (path === "/hit") {
+      if (method !== "POST") return errorJson(405, "method_not_allowed", "POST only (navigator.sendBeacon from indexagentica.com).", {}, { allow: "POST, OPTIONS" });
+      const hrl = await checkRateLimit(request, env, "hit");
+      if (!hrl.success) return errorJson(429, "rate_limited", "Too many hits.", { retry_after: hrl.retryAfter }, { "retry-after": String(hrl.retryAfter) });
+      return handleHit(request, env, ctx, (status, body) => (body === undefined ? empty(status) : json(status, body)));
+    }
+    if (path === "/stats") {
+      if (method !== "GET" && method !== "HEAD") return errorJson(405, "method_not_allowed", "GET only.", {}, { allow: "GET, HEAD, OPTIONS" });
+      const srl = await checkRateLimit(request, env, "stats");
+      if (!srl.success) return errorJson(429, "rate_limited", "Too many requests.", { retry_after: srl.retryAfter }, { "retry-after": String(srl.retryAfter) });
+      const r = await statsResponse(request, env, ctx, baseUrl(request, env), uaClass);
+      const maxAge = r.status === 200 && r.body.status === "ok" ? CACHE_SECONDS : 60;
+      return json(r.status, r.body, { "cache-control": `public, max-age=${maxAge}` });
     }
 
     const rl = await checkRateLimit(request, env);

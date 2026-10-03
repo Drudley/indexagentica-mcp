@@ -23,6 +23,15 @@ RATE_LIMIT_PERIOD_SECONDS = "60"
 ALLOWED_ORIGINS = "*"
 # Public URL so links in GET / are canonical.
 PUBLIC_BASE_URL = "https://mcp.indexagentica.com"
+# Usage stats (src/stats.js, src/hits.js). CF_ANALYTICS_TOKEN (Account Analytics Read) is a
+# secret: `wrangler secret put CF_ANALYTICS_TOKEN`. Without it /stats answers status "collecting".
+CF_ACCOUNT_ID = "ab100e144ef0d4c54ae8e2d4e099b287"
+# First deploy with request logging (MCP/REST counts start here).
+STATS_API_SINCE = "2026-10-02T20:21:47Z"
+# Deploy time of the site beacon + /hit (site page views, clicks, downloads start here).
+STATS_BEACON_SINCE = "2026-10-03T05:07:00Z"
+# Origins allowed to POST /hit.
+HIT_ORIGINS = "https://indexagentica.com,https://www.indexagentica.com"
 
 # Workers Rate Limiting binding (per key, per Cloudflare location).
 # namespace_id is any positive integer unique within the Cloudflare account.
@@ -40,6 +49,20 @@ namespace_id = "4201"
 [[analytics_engine_datasets]]
 binding = "ANALYTICS"
 dataset = "indexagentica_mcp"
+
+# Site beacons (POST /hit): page views, outbound clicks, skill downloads. Index "hit:<event>".
+[[analytics_engine_datasets]]
+binding = "HITS"
+dataset = "indexagentica_hits"
+
+# Durable daily rollup for all-time /stats (Analytics Engine keeps only 3 months).
+[[kv_namespaces]]
+binding = "STATS_KV"
+id = "26ddeb51a2204ced97e8db481fd2030e"
+
+# Daily at 00:30 UTC: store the previous UTC day's totals in STATS_KV.
+[triggers]
+crons = ["30 0 * * *"]
 
 [observability]
 enabled = true

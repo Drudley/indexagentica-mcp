@@ -31,10 +31,11 @@ export function clientKey(request) {
 }
 
 /** @returns {Promise<{success: boolean, retryAfter: number, limit: number, period: number, mode: string}>} */
-export async function checkRateLimit(request, env) {
+export async function checkRateLimit(request, env, prefix = "ip") {
   const limit = Number(env.RATE_LIMIT_REQUESTS) || 120;
   const period = Number(env.RATE_LIMIT_PERIOD_SECONDS) || 60;
-  const key = `ip:${clientKey(request)}`;
+  // Separate counters per prefix (e.g. "hit" for site beacons) so page views don't eat the API budget.
+  const key = `${prefix}:${clientKey(request)}`;
   if (env.RATE_LIMITER && typeof env.RATE_LIMITER.limit === "function") {
     try {
       const { success } = await env.RATE_LIMITER.limit({ key });

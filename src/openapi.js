@@ -53,6 +53,24 @@ export function openapi(base) {
         },
       },
       "/.well-known/mcp/server-card.json": { get: { operationId: "getServerCard", summary: "Static MCP server card (serverInfo, authentication, tools, resources, prompts), generated from the tool definitions", responses: { 200: { description: "Server card" } } } },
+      "/stats": {
+        get: {
+          operationId: "getStats",
+          summary: "Public usage stats: site page views, outbound clicks, skill downloads, MCP tool calls (per tool), REST requests and the agent/human split, for the last 24h, last 7 days and all time since the stated `since` timestamps. Cached 10 minutes.",
+          responses: {
+            200: { description: "`status: ok` with `windows.last_24h|last_7d|all_time`, or `status: collecting` (no numbers yet) when aggregation is not configured" },
+            503: { description: "`status: unavailable`: the analytics backend could not be queried" },
+          },
+        },
+      },
+      "/hit": {
+        post: {
+          operationId: "postHit",
+          summary: "Site usage beacon (used by indexagentica.com's inline script; accepts only that origin). Body: {t: pageview|click|download, p: page path, id?, h?, k?}. No cookies, IPs or ids are stored.",
+          requestBody: { content: { "text/plain": { schema: { type: "string", maxLength: 512 } } } },
+          responses: { 204: { description: "Counted" }, 400: { description: "Rejected (unknown event, path, id or host)" }, 403: { description: "Origin not allowed" } },
+        },
+      },
       "/categories": { get: { operationId: "listCategories", summary: "List categories with counts", responses: { 200: { description: "Categories" } } } },
       "/mcp": { post: { operationId: "mcp", summary: "MCP Streamable HTTP endpoint (JSON-RPC 2.0)", responses: { 200: { description: "JSON-RPC response" }, 202: { description: "Notification accepted" } } } },
     },

@@ -174,6 +174,25 @@ await check("GET /.well-known/mcp/server-card.json", async () => {
   assert(["search", "get_entry", "get_content", "list_categories"].every((n) => body.tools.some((t) => t.name === n && t.inputSchema)), "tools");
 });
 
+console.log("Usage stats (/stats, /hit; no hit is stored by these checks)");
+await check("GET /stats -> ok or collecting, with since labels", async () => {
+  const { res, body } = await get("/stats");
+  assert([200, 503].includes(res.status), `status ${res.status}`);
+  assert(["ok", "collecting", "unavailable"].includes(body.status), `status field ${body.status}`);
+  assert(body.since && body.since.mcp_api && body.since.site_beacon, "since labels");
+  if (body.status === "ok") assert(body.windows.last_24h && body.windows.last_7d && body.windows.all_time, "windows");
+  else assert(!body.windows, "no numbers unless ok");
+  assert(/max-age=\d+/.test(res.headers.get("cache-control") || ""), "cache-control");
+});
+await check("POST /hit rejects bad origin, unknown path, wrong method", async () => {
+  const post = (headers, body) => fetch(`${BASE}/hit`, { method: "POST", headers: { "content-type": "text/plain", ...headers }, body });
+  assert((await post({}, JSON.stringify({ t: "pageview", p: "/" }))).status === 403, "no origin");
+  assert((await post({ origin: "https://evil.example" }, JSON.stringify({ t: "pageview", p: "/" }))).status === 403, "bad origin");
+  assert((await post({ origin: "https://indexagentica.com" }, JSON.stringify({ t: "pageview", p: "/no-such-page/" }))).status === 400, "unknown path");
+  assert((await post({ origin: "https://indexagentica.com" }, JSON.stringify({ t: "pageview", p: "/", uid: "x" }))).status === 400, "extra field");
+  assert((await fetch(`${BASE}/hit`)).status === 405, "GET");
+});
+
 console.log("MCP legacy era (initialize handshake, stateless)");
 await check("initialize negotiates version, no session id", async () => {
   const { res, body } = await rpcLegacy("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "e2e", version: "1" } }, 1, null);

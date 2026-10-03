@@ -3,11 +3,14 @@
 // Privacy (see README "Usage logging"): no IP addresses, no search query text,
 // no tool arguments beyond low-cardinality filters and public catalog ids, no
 // cookies or auth (there are none). User-Agent and client name/version are
-// truncated. Country, colo and ASN come from Cloudflare's request.cf.
+// truncated. Country, colo and ASN come from Cloudflare's request.cf. ua_class
+// ("human" for browser user agents, "agent" otherwise; src/ua.js) feeds /stats.
 //
 // No-op when the ANALYTICS binding is missing (local dev without the binding,
 // unit tests, other environments), and never throws: logging must not affect
 // responses.
+
+import { uaClass } from "./ua.js";
 
 const ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
@@ -15,7 +18,7 @@ const ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const BLOBS = [
   "route", "endpoint", "rpc_method", "tool", "client_name", "client_version", "user_agent",
   "protocol_version", "era", "outcome", "detail", "country", "colo", "type_filter",
-  "category_filter", "target_id",
+  "category_filter", "target_id", "ua_class",
 ];
 export const DOUBLES = ["http_status", "latency_ms", "asn", "result_count", "query_chars", "query_words"];
 
@@ -81,7 +84,7 @@ export function dataPoint(log, status, cf = {}) {
   const blobs = [
     log.route, log.endpoint, cut(log.method, 40), cut(log.tool, 40), cut(log.clientName, 64), cut(log.clientVersion, 32),
     cut(log.ua, 128), cut(log.protocol, 16), log.era, outcome, cut(log.detail, 40), cut(cf.country, 4), cut(cf.colo, 8),
-    log.type, log.category, log.target,
+    log.type, log.category, log.target, uaClass(log.ua),
   ];
   const num = (v) => (Number.isFinite(v) ? v : 0);
   const doubles = [status, Math.max(0, Date.now() - log.t0), num(Number(cf.asn)), num(log.resultCount), num(log.queryChars), num(log.queryWords)];

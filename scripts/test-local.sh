@@ -14,7 +14,7 @@ done
 cleanup() { for g in "${PID1:-}" "${PID2:-}"; do [ -n "$g" ] && kill -- "-$g" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
-echo "== unit tests"; node --test test/unit.test.mjs
+echo "== unit tests"; node --test test/unit.test.mjs test/stats.test.mjs
 
 wait_ready() { for _ in $(seq 1 60); do grep -q "Ready on" "$1" && return 0; sleep 1; done; return 1; }
 # Start sequentially with distinct inspector ports (parallel starts race on internal ports).

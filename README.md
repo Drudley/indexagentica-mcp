@@ -33,6 +33,8 @@ The same Worker also answers at `https://indexagentica-mcp.indexagentica.workers
 | GET | `/categories` | Categories with counts |
 | GET | `/openapi.json` | OpenAPI 3.1 for the REST API |
 | GET | `/.well-known/mcp/server-card.json` | Static server card (Smithery scan fallback): `serverInfo`, `authentication: {required: false}`, the same `tools` as `tools/list`, empty `resources`/`prompts` |
+| GET | `/stats` | Public usage stats (JSON): site page views, outbound clicks, skill downloads, MCP tool calls per tool, REST requests, agent/human split; last 24h, last 7 days, all time since the `since` timestamps. Cached 10 min. See [Usage stats](#usage-stats-get-stats) |
+| POST | `/hit` | Site usage beacon from indexagentica.com's inline script (origin-checked, strictly validated, 204). See [Site beacons](#site-beacons-post-hit) |
 | GET | `/health` | Liveness (not rate limited) |
 
 Errors are always JSON: `{"error":{"status":400,"code":"bad_request","message":"..."}}`
@@ -92,7 +94,7 @@ build appear automatically. Nothing is written anywhere.
 
 ## Usage logging (Workers Analytics Engine)
 
-Each request (except `OPTIONS`, `/health`, `/robots.txt`, `/favicon.ico`) writes one data point to the
+Each request (except `OPTIONS`, `/health`, `/robots.txt`, `/favicon.ico`, `/hit`, `/stats`) writes one data point to the
 Analytics Engine dataset **`indexagentica_mcp`** (binding `ANALYTICS` in `wrangler.toml`), so we can count
 agent usage per tool and client. If the binding is missing (local tests, the `ratelimit-test` env),
 logging is a no-op, and a failing write never affects the response. Workers Free includes
@@ -113,6 +115,7 @@ data is kept for 3 months ([limits](https://developers.cloudflare.com/analytics/
 | `blob11` | detail | JSON-RPC error code, `tool_error`, or HTTP status |
 | `blob12`, `blob13` | country, colo | from `request.cf` |
 | `blob14`, `blob15`, `blob16` | type filter, category filter, target id | only kebab-case values (public catalog slugs/ids); anything else is stored as `invalid` |
+| `blob17` | UA class | `human` (mainstream browser User-Agent) or `agent` (everything else: MCP clients, SDKs, curl, crawlers, headless browsers); see `src/ua.js`. Added 2026-10-03; earlier rows are classified from `blob7` at query time |
 | `double1` | HTTP status | |
 | `double2` | latency (ms) | wall time inside the Worker (Workers clocks advance on I/O) |
 | `double3` | ASN | from `request.cf.asn` (network, not person) |
@@ -120,9 +123,53 @@ data is kept for 3 months ([limits](https://developers.cloudflare.com/analytics/
 | `double5`, `double6` | query length in characters, words | |
 
 **Privacy:** no IP addresses, no search query text, no free-text tool arguments, no cookies or
-tokens (the server has none). Clients are identified only by their self-reported name/version and a
+tokens (the server has none), and for site beacons no referrers, query strings or client identifiers. Clients are identified only by their self-reported name/version and a
 truncated User-Agent. Example query (SQL API):
 `SELECT blob4 AS tool, blob5 AS client, SUM(_sample_interval) AS requests FROM indexagentica_mcp WHERE timestamp > NOW() - INTERVAL '1' DAY GROUP BY tool, client ORDER BY requests DESC`.
+
+### Site beacons (`POST /hit`)
+
+Every page of indexagentica.com carries a small inline script (no cookies, no localStorage, no
+identifiers, no third-party code). It is skipped when `navigator.webdriver` is set or the browser sends
+Do Not Track or Global Privacy Control. It sends, with `navigator.sendBeacon` (as `text/plain`, so no
+CORS preflight):
+
+| Event | Body | When |
+| --- | --- | --- |
+| page view | `{"t":"pageview","p":"/entries/x402/"}` | page load; `p` is the page's canonical path (no query string, no referrer) |
+| outbound click | `{"t":"click","p":"/entries/x402/","id":"x402","h":"www.x402.org"}` | click on a listing's website/repo/docs/source link on its entry page |
+| download | `{"t":"download","p":"/skills/<id>/","id":"<id>","k":"zip"\|"skill_md"}` | click on a skill zip or raw `SKILL.md` link |
+
+The Worker accepts only `Origin: https://indexagentica.com` (`HIT_ORIGINS`), bodies up to 512 bytes,
+the three event types with exactly their fields, `p` from the set of pages the site publishes, ids
+that exist in the published index, and hosts that the entry actually links to. Anything else gets
+`400` and is not stored. `/hit` has its own rate-limit counter (same 120/min per IP). Accepted hits go
+to the separate dataset **`indexagentica_hits`** (binding `HITS`), index `hit:<event>`:
+
+| Column | Field |
+| --- | --- |
+| `blob1` | event: `pageview`, `click`, `download` |
+| `blob2` | page path |
+| `blob3` | entry or skill id (click, download) |
+| `blob4` | destination host (click) |
+| `blob5` | download kind: `zip`, `skill_md` |
+| `blob6` | UA class (`human` / `agent`) |
+| `blob7` | country (from `request.cf`) |
+| `double1` | 1 |
+
+### Usage stats (`GET /stats`)
+
+Aggregates both datasets through the [Analytics Engine SQL API](https://developers.cloudflare.com/analytics/analytics-engine/sql-api/)
+using the secret `CF_ANALYTICS_TOKEN` (Account Analytics Read) and `CF_ACCOUNT_ID`. Counts are
+`SUM(_sample_interval)`. Windows: `last_24h`, `last_7d` (rolling) and `all_time`. Because Analytics
+Engine keeps 3 months, a daily cron (`30 0 * * *`) stores each completed UTC day's totals in Workers KV
+(`STATS_KV`, key `day:YYYY-MM-DD`); `all_time` = stored days + a live query from the first day not yet
+stored (`/stats` also catches up missing days lazily). `since.mcp_api` (`STATS_API_SINCE`, first deploy
+with request logging) and `since.site_beacon` (`STATS_BEACON_SINCE`, deploy of the beacon) label where
+counting starts; nothing earlier is estimated or backfilled. Only the server's own tool names are
+published (anything else is `unknown_tool`). Responses are cached 10 minutes (Cache API + in-memory,
+`Cache-Control: public, max-age=600`). Without the token the endpoint answers
+`{"status":"collecting", ...}` with no numbers; if the SQL API fails, `503 {"status":"unavailable"}`.
 
 ## Rate limiting
 
@@ -195,6 +242,12 @@ Other clients use their own name for Streamable HTTP (Cline: `"type": "streamabl
 | `RATE_LIMIT_REQUESTS`, `RATE_LIMIT_PERIOD_SECONDS` | `120`, `60` | Documented limit + fallback bucket (keep in sync with `[ratelimits.simple]`) |
 | `ALLOWED_ORIGINS` | `*` | Comma-separated Origin allow-list for browser callers |
 | `PUBLIC_BASE_URL` | request origin | Canonical base for links in `GET /` |
+| `CF_ACCOUNT_ID` | (none) | Account for the Analytics Engine SQL API (`/stats`) |
+| `STATS_API_SINCE`, `STATS_BEACON_SINCE` | `2026-10-02T20:21:47Z`, (deploy time) | Where MCP/REST and site-beacon counting start (shown as `since` in `/stats`) |
+| `HIT_ORIGINS` | `https://indexagentica.com,https://www.indexagentica.com` | Origins allowed to `POST /hit` |
+
+Secret: `CF_ANALYTICS_TOKEN` (Account Analytics Read), set with `wrangler secret put CF_ANALYTICS_TOKEN`.
+Bindings: `ANALYTICS` and `HITS` (Analytics Engine), `STATS_KV` (KV), `RATE_LIMITER`; cron `30 0 * * *`.
 
 ## Deploy
 
@@ -221,6 +274,9 @@ src/data.js       fetch + cache of /api/index.json
 src/ratelimit.js  Workers rate limiting binding + in-isolate fallback
 src/openapi.js    OpenAPI document for the REST API
 src/analytics.js  per-request usage logging to Workers Analytics Engine (no-op without the binding)
+src/ua.js         human (browser) vs agent User-Agent classification
+src/hits.js       POST /hit: site beacon validation + logging (dataset indexagentica_hits)
+src/stats.js      GET /stats: Analytics Engine SQL aggregation, KV daily rollup (cron), caching
 test/             unit tests, E2E script, Inspector config
 docs/             proposed copy for llms.txt, /agents and the directory listing
 ```
