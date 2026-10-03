@@ -34,6 +34,8 @@ The same Worker also answers at `https://indexagentica-mcp.indexagentica.workers
 | GET | `/openapi.json` | OpenAPI 3.1 for the REST API |
 | GET | `/.well-known/mcp/server-card.json` | Static server card (Smithery scan fallback): `serverInfo`, `authentication: {required: false}`, the same `tools` as `tools/list`, empty `resources`/`prompts` |
 | GET | `/stats` | Public usage stats (JSON): site page views, outbound clicks, skill downloads, MCP tool calls per tool, REST requests, agent/human split; last 24h, last 7 days, all time since the `since` timestamps. Cached 10 min. See [Usage stats](#usage-stats-get-stats) |
+| GET | `/v1/usage` | Alias of `/stats` (used by the site; less likely to be caught by content-blocker filters) |
+| POST | `/v1/e` | Alias of `/hit` (used by the site) |
 | POST | `/hit` | Site usage beacon from indexagentica.com's inline script (origin-checked, strictly validated, 204). See [Site beacons](#site-beacons-post-hit) |
 | GET | `/health` | Liveness (not rate limited) |
 
@@ -140,7 +142,9 @@ CORS preflight):
 | outbound click | `{"t":"click","p":"/entries/x402/","id":"x402","h":"www.x402.org"}` | click on a listing's website/repo/docs/source link on its entry page |
 | download | `{"t":"download","p":"/skills/<id>/","id":"<id>","k":"zip"\|"skill_md"}` | click on a skill zip or raw `SKILL.md` link |
 
-The Worker accepts only `Origin: https://indexagentica.com` (`HIT_ORIGINS`), bodies up to 512 bytes,
+The site posts to the alias `/v1/e` on `mcp.indexagentica.com` and falls back to the same path on
+`indexagentica-mcp.indexagentica.workers.dev` if that fails (same Worker, same checks). The Worker accepts
+only `Origin: https://indexagentica.com` (`HIT_ORIGINS`), bodies up to 512 bytes,
 the three event types with exactly their fields, `p` from the set of pages the site publishes, ids
 that exist in the published index, and hosts that the entry actually links to. Anything else gets
 `400` and is not stored. `/hit` has its own rate-limit counter (same 120/min per IP). Accepted hits go

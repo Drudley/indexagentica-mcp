@@ -57,6 +57,7 @@ export function openapi(base) {
         get: {
           operationId: "getStats",
           summary: "Public usage stats: site page views, outbound clicks, skill downloads, MCP tool calls (per tool), REST requests and the agent/human split, for the last 24h, last 7 days and all time since the stated `since` timestamps. Cached 10 minutes.",
+          description: "Also served at /v1/usage (alias used by the site).",
           responses: {
             200: { description: "`status: ok` with `windows.last_24h|last_7d|all_time`, or `status: collecting` (no numbers yet) when aggregation is not configured" },
             503: { description: "`status: unavailable`: the analytics backend could not be queried" },
@@ -67,6 +68,7 @@ export function openapi(base) {
         post: {
           operationId: "postHit",
           summary: "Site usage beacon (used by indexagentica.com's inline script; accepts only that origin). Body: {t: pageview|click|download, p: page path, id?, h?, k?}. No cookies, IPs or ids are stored.",
+          description: "Also served at /v1/e (alias used by the site). Same validation on mcp.indexagentica.com and the workers.dev host.",
           requestBody: { content: { "text/plain": { schema: { type: "string", maxLength: 512 } } } },
           responses: { 204: { description: "Counted" }, 400: { description: "Rejected (unknown event, path, id or host)" }, 403: { description: "Origin not allowed" } },
         },

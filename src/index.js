@@ -10,6 +10,11 @@ import { handleHit } from "./hits.js";
 import { statsResponse, rollup, CACHE_SECONDS } from "./stats.js";
 import { uaClass } from "./ua.js";
 
+// Site beacon and public stats. The /v1/* aliases are what the site uses: less likely to match
+// content-blocker filter lists than /hit and /stats (which keep working).
+const HIT_PATHS = ["/hit", "/v1/e"];
+const STATS_PATHS = ["/stats", "/v1/usage"];
+
 const CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
@@ -90,6 +95,7 @@ function landing(request, env) {
       openapi: `${base}/openapi.json`,
       server_card: `${base}/.well-known/mcp/server-card.json`,
       stats: `${base}/stats`,
+      stats_alias: `${base}/v1/usage`,
     },
     rate_limit: {
       requests: Number(env.RATE_LIMIT_REQUESTS) || 120,
@@ -126,7 +132,7 @@ export default {
     const path = url.pathname.replace(/\/+$/, "") || "/";
     // One Analytics Engine data point per request, except preflights, unmetered housekeeping,
     // site beacons (/hit, logged to their own dataset) and /stats (fetched by every site footer).
-    const skip = request.method.toUpperCase() === "OPTIONS" || ["/health", "/favicon.ico", "/robots.txt", "/hit", "/stats"].includes(path);
+    const skip = request.method.toUpperCase() === "OPTIONS" || ["/health", "/favicon.ico", "/robots.txt", ...HIT_PATHS, ...STATS_PATHS].includes(path);
     const log = skip ? null : newLog(request, path);
     const res = await handle(request, env, ctx, url, path, log);
     if (log) {
@@ -160,13 +166,13 @@ async function handle(request, env, ctx, url, path, log) {
     }
 
     // Site beacons and public stats: own rate-limit counters, no request log in the API dataset.
-    if (path === "/hit") {
+    if (HIT_PATHS.includes(path)) {
       if (method !== "POST") return errorJson(405, "method_not_allowed", "POST only (navigator.sendBeacon from indexagentica.com).", {}, { allow: "POST, OPTIONS" });
       const hrl = await checkRateLimit(request, env, "hit");
       if (!hrl.success) return errorJson(429, "rate_limited", "Too many hits.", { retry_after: hrl.retryAfter }, { "retry-after": String(hrl.retryAfter) });
       return handleHit(request, env, ctx, (status, body) => (body === undefined ? empty(status) : json(status, body)));
     }
-    if (path === "/stats") {
+    if (STATS_PATHS.includes(path)) {
       if (method !== "GET" && method !== "HEAD") return errorJson(405, "method_not_allowed", "GET only.", {}, { allow: "GET, HEAD, OPTIONS" });
       const srl = await checkRateLimit(request, env, "stats");
       if (!srl.success) return errorJson(429, "rate_limited", "Too many requests.", { retry_after: srl.retryAfter }, { "retry-after": String(srl.retryAfter) });

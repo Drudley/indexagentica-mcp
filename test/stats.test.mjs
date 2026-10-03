@@ -208,3 +208,19 @@ test("GET /stats when the SQL API fails: 503 unavailable, no numbers", async () 
     assert.equal(b.windows, undefined);
   } finally { globalThis.fetch = prev; }
 });
+
+test("aliases /v1/usage and /v1/e behave like /stats and /hit; neither is logged to ANALYTICS", async () => {
+  _resetStatsCache();
+  const env = { ...BASE_ENV, ...recorder() };
+  const st = await worker.fetch(new Request("https://mcp.test/v1/usage"), env, {});
+  assert.equal(st.status, 200);
+  assert.equal((await st.json()).status, "collecting");
+  const h = await worker.fetch(new Request("https://mcp.test/v1/e", { method: "POST", headers: { ...ORIGIN, "content-type": "text/plain", "cf-connecting-ip": "10.3.3.3" }, body: JSON.stringify({ t: "pageview", p: "/agents/" }) }), env, {});
+  assert.equal(h.status, 204);
+  assert.equal(env.points.length, 1);
+  assert.equal(env.points[0].indexes[0], "hit:pageview");
+  // workers.dev host: same origin check, same result
+  const w = await worker.fetch(new Request("https://indexagentica-mcp.indexagentica.workers.dev/v1/e", { method: "POST", headers: { ...ORIGIN, "content-type": "text/plain", "cf-connecting-ip": "10.3.3.4" }, body: JSON.stringify({ t: "pageview", p: "/" }) }), env, {});
+  assert.equal(w.status, 204);
+  assert.equal((await worker.fetch(new Request("https://mcp.test/v1/e", { method: "POST", headers: { origin: "https://evil.example" }, body: "{}" }), env, {})).status, 403);
+});
