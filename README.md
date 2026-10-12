@@ -118,6 +118,8 @@ data is kept for 3 months ([limits](https://developers.cloudflare.com/analytics/
 | `blob12`, `blob13` | country, colo | from `request.cf` |
 | `blob14`, `blob15`, `blob16` | type filter, category filter, target id | only kebab-case values (public catalog slugs/ids); anything else is stored as `invalid` |
 | `blob17` | UA class | `human` (mainstream browser User-Agent) or `agent` (everything else: MCP clients, SDKs, curl, crawlers, headless browsers); see `src/ua.js`. Added 2026-10-03; earlier rows are classified from `blob7` at query time |
+| `blob18` | traffic | `internal` (our own tests/agents, see [Internal traffic](#internal-traffic)) or `outside`; empty before 2026-10-12 |
+| `blob19` | internal rule | `header`, `ua` or `ip` (empty for outside traffic) |
 | `double1` | HTTP status | |
 | `double2` | latency (ms) | wall time inside the Worker (Workers clocks advance on I/O) |
 | `double3` | ASN | from `request.cf.asn` (network, not person) |
@@ -159,6 +161,8 @@ to the separate dataset **`indexagentica_hits`** (binding `HITS`), index `hit:<e
 | `blob5` | download kind: `zip`, `skill_md` |
 | `blob6` | UA class (`human` / `agent`) |
 | `blob7` | country (from `request.cf`) |
+| `blob8` | traffic: `internal` / `outside` (empty before 2026-10-12) |
+| `blob9` | internal rule: `header`, `ua`, `ip` |
 | `double1` | 1 |
 
 ### Usage stats (`GET /stats`)
@@ -174,6 +178,39 @@ counting starts; nothing earlier is estimated or backfilled. Only the server's o
 published (anything else is `unknown_tool`). Responses are cached 10 minutes (Cache API + in-memory,
 `Cache-Control: public, max-age=600`). Without the token the endpoint answers
 `{"status":"collecting", ...}` with no numbers; if the SQL API fails, `503 {"status":"unavailable"}`.
+
+Every window counts **outside traffic only** and adds: `site.downloads.by_skill`,
+`site.outbound_clicks_by_entry`, `mcp.top_clients` (self-reported MCP client names, lowercased and
+stripped to `[a-z0-9._ -]`, top 10, only names seen ≥ 3 times), `top_user_agent_families` (bot name,
+`browser`, `headless-chrome` or first product token; top 10, ≥ 3) and `internal_excluded` (what was left
+out, by rule). KV days carry a rollup version (`v`); days from an older version are recomputed while the
+raw data is still retained, so rule changes apply retroactively. The lazy catch-up recomputes at most 2
+days per `/stats` call and the cron 5 per run (each day is ~7 SQL subrequests; Workers Free allows 50).
+
+### Internal traffic
+
+Our own tests, monitors and agents are logged but excluded from `/stats`. A request or beacon is
+internal if any rule matches (`src/internal.js`):
+
+| Rule | Match |
+| --- | --- |
+| `header` | `X-Indexagentica-Internal: 1` (allowed in CORS; `test/e2e.mjs` sends it on every request) |
+| `ua` | User-Agent contains `indexagentica` (our clients use `indexagentica-<agent>/1`) |
+| `ip` | client IP inside a CIDR listed in the optional secret `INTERNAL_IPS` (comma-separated, IPv4/IPv6). Unset: our shared box egresses through rotating addresses in a shared relay range, so an IP rule would also drop strangers |
+
+Rows logged before the flag existed (2026-10-12) are matched retroactively in SQL by the signature of
+our own sessions (`API_RETRO` / `HITS_RETRO` in `src/stats.js`): API rows whose MCP client name is
+`e2e` (our test suite), or from the US with a curl/node/python/headless-Chrome User-Agent inside the
+documented launch and verification windows (2026-10-02 20:15–20:45 and 2026-10-03 04:55–05:50 UTC),
+and site beacons from the US between 05:00 and 05:50 UTC on 2026-10-03. This is best effort: internal
+sessions that looked like outside traffic may still be counted, and outside requests with the same
+generic clients inside those windows are excluded.
+
+How our own agents should call the server:
+
+```sh
+curl -H 'X-Indexagentica-Internal: 1' -A 'indexagentica-steward/1' https://mcp.indexagentica.com/stats
+```
 
 ## Rate limiting
 
@@ -248,6 +285,7 @@ Other clients use their own name for Streamable HTTP (Cline: `"type": "streamabl
 | `PUBLIC_BASE_URL` | request origin | Canonical base for links in `GET /` |
 | `CF_ACCOUNT_ID` | (none) | Account for the Analytics Engine SQL API (`/stats`) |
 | `STATS_API_SINCE`, `STATS_BEACON_SINCE` | `2026-10-02T20:21:47Z`, (deploy time) | Where MCP/REST and site-beacon counting start (shown as `since` in `/stats`) |
+| `INTERNAL_IPS` (secret, optional) | (none) | Comma-separated CIDRs whose requests count as internal traffic |
 | `HIT_ORIGINS` | `https://indexagentica.com,https://www.indexagentica.com` | Origins allowed to `POST /hit` |
 
 Secret: `CF_ANALYTICS_TOKEN` (Account Analytics Read), set with `wrangler secret put CF_ANALYTICS_TOKEN`.
@@ -281,6 +319,7 @@ src/analytics.js  per-request usage logging to Workers Analytics Engine (no-op w
 src/ua.js         human (browser) vs agent User-Agent classification
 src/hits.js       POST /hit: site beacon validation + logging (dataset indexagentica_hits)
 src/stats.js      GET /stats: Analytics Engine SQL aggregation, KV daily rollup (cron), caching
+src/internal.js   internal-traffic rules (header, UA, optional IP ranges)
 test/             unit tests, E2E script, Inspector config
 docs/             proposed copy for llms.txt, /agents and the directory listing
 ```

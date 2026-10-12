@@ -10,11 +10,12 @@
 // (indexagentica_hits), index "hit:<event>".
 import { getData, ROUTES } from "./data.js";
 import { uaClass } from "./ua.js";
+import { internalRule } from "./internal.js";
 
 export const HIT_EVENTS = ["pageview", "click", "download"];
 export const DOWNLOAD_KINDS = ["zip", "skill_md"];
 /** Column layout of indexagentica_hits. Append only, never reorder. */
-export const HIT_BLOBS = ["event", "path", "entry_id", "dest_host", "download_kind", "ua_class", "country"];
+export const HIT_BLOBS = ["event", "path", "entry_id", "dest_host", "download_kind", "ua_class", "country", "traffic", "internal_rule"];
 export const MAX_HIT_BYTES = 512;
 const DEFAULT_ORIGINS = "https://indexagentica.com,https://www.indexagentica.com";
 const ALLOWED_KEYS = { pageview: ["t", "p"], click: ["t", "p", "id", "h"], download: ["t", "p", "id", "k"] };
@@ -74,10 +75,10 @@ export function validateHit(body, d) {
   return { ok: true, hit };
 }
 
-export function hitDataPoint(hit, ua, cf = {}) {
+export function hitDataPoint(hit, ua, cf = {}, rule = "") {
   return {
     indexes: [`hit:${hit.event}`],
-    blobs: [hit.event, hit.path, hit.id, hit.host, hit.kind, uaClass(ua), String(cf.country || "").slice(0, 4)],
+    blobs: [hit.event, hit.path, hit.id, hit.host, hit.kind, uaClass(ua), String(cf.country || "").slice(0, 4), rule ? "internal" : "outside", rule],
     doubles: [1],
   };
 }
@@ -106,7 +107,7 @@ export async function handleHit(request, env, ctx, reply) {
   if (!v.ok) return reply(400, { error: { status: 400, code: "bad_request", message: v.error } });
   const ds = env.HITS;
   if (ds && typeof ds.writeDataPoint === "function") {
-    try { ds.writeDataPoint(hitDataPoint(v.hit, request.headers.get("user-agent") || "", request.cf || {})); } catch { /* never affects the response */ }
+    try { ds.writeDataPoint(hitDataPoint(v.hit, request.headers.get("user-agent") || "", request.cf || {}, internalRule(request, env))); } catch { /* never affects the response */ }
   }
   return reply(204);
 }

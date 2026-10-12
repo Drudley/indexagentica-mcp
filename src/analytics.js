@@ -18,7 +18,7 @@ const ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 export const BLOBS = [
   "route", "endpoint", "rpc_method", "tool", "client_name", "client_version", "user_agent",
   "protocol_version", "era", "outcome", "detail", "country", "colo", "type_filter",
-  "category_filter", "target_id", "ua_class",
+  "category_filter", "target_id", "ua_class", "traffic", "internal_rule",
 ];
 export const DOUBLES = ["http_status", "latency_ms", "asn", "result_count", "query_chars", "query_words"];
 
@@ -43,6 +43,7 @@ export function newLog(request, path) {
     detail: "", type: "", category: "", target: "",
     resultCount: NaN, queryChars: NaN, queryWords: NaN,
     rpcError: false, toolError: false,
+    rule: "", // internal-traffic rule (src/internal.js), set by the router
   };
 }
 
@@ -84,7 +85,7 @@ export function dataPoint(log, status, cf = {}) {
   const blobs = [
     log.route, log.endpoint, cut(log.method, 40), cut(log.tool, 40), cut(log.clientName, 64), cut(log.clientVersion, 32),
     cut(log.ua, 128), cut(log.protocol, 16), log.era, outcome, cut(log.detail, 40), cut(cf.country, 4), cut(cf.colo, 8),
-    log.type, log.category, log.target, uaClass(log.ua),
+    log.type, log.category, log.target, uaClass(log.ua), log.rule ? "internal" : "outside", log.rule || "",
   ];
   const num = (v) => (Number.isFinite(v) ? v : 0);
   const doubles = [status, Math.max(0, Date.now() - log.t0), num(Number(cf.asn)), num(log.resultCount), num(log.queryChars), num(log.queryWords)];

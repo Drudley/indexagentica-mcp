@@ -56,8 +56,8 @@ export function openapi(base) {
       "/stats": {
         get: {
           operationId: "getStats",
-          summary: "Public usage stats: site page views, outbound clicks, skill downloads, MCP tool calls (per tool), REST requests and the agent/human split, for the last 24h, last 7 days and all time since the stated `since` timestamps. Cached 10 minutes.",
-          description: "Also served at /v1/usage (alias used by the site).",
+          summary: "Public usage stats (outside traffic only): site page views, outbound clicks (by entry), skill downloads (by skill), MCP tool calls (per tool), top MCP clients, REST requests, top User-Agent families and the agent/human split, for the last 24h, last 7 days and all time since the stated `since` timestamps. Cached 10 minutes.",
+          description: "Also served at /v1/usage (alias used by the site). Our own traffic (header X-Indexagentica-Internal: 1, User-Agent containing indexagentica, or a configured IP range; earlier rows matched retroactively) is excluded and reported as internal_excluded; see internal_rules in the response.",
           responses: {
             200: { description: "`status: ok` with `windows.last_24h|last_7d|all_time`, or `status: collecting` (no numbers yet) when aggregation is not configured" },
             503: { description: "`status: unavailable`: the analytics backend could not be queried" },

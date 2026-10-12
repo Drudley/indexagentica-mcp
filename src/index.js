@@ -9,6 +9,7 @@ import { newLog, noteArgs, writeLog } from "./analytics.js";
 import { handleHit } from "./hits.js";
 import { statsResponse, rollup, CACHE_SECONDS } from "./stats.js";
 import { uaClass } from "./ua.js";
+import { internalRule } from "./internal.js";
 
 // Site beacon and public stats. The /v1/* aliases are what the site uses: less likely to match
 // content-blocker filter lists than /hit and /stats (which keep working).
@@ -19,7 +20,7 @@ const CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, OPTIONS",
   "access-control-allow-headers":
-    "content-type, accept, authorization, mcp-protocol-version, mcp-method, mcp-name, mcp-session-id, last-event-id",
+    "content-type, accept, authorization, mcp-protocol-version, mcp-method, mcp-name, mcp-session-id, last-event-id, x-indexagentica-internal",
   "access-control-expose-headers": "mcp-protocol-version, retry-after, x-ratelimit-limit, x-ratelimit-period",
   "access-control-max-age": "86400",
 };
@@ -134,6 +135,7 @@ export default {
     // site beacons (/hit, logged to their own dataset) and /stats (fetched by every site footer).
     const skip = request.method.toUpperCase() === "OPTIONS" || ["/health", "/favicon.ico", "/robots.txt", ...HIT_PATHS, ...STATS_PATHS].includes(path);
     const log = skip ? null : newLog(request, path);
+    if (log) log.rule = internalRule(request, env);
     const res = await handle(request, env, ctx, url, path, log);
     if (log) {
       if (res.status >= 400 && !log.detail) log.detail = String(res.status);
@@ -144,7 +146,8 @@ export default {
 
   // Daily cron ([triggers] in wrangler.toml): store yesterday's totals in KV for the all-time figure.
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(rollup(env, uaClass, { maxDays: 100 }).catch((err) => console.error("stats rollup failed", err && err.message)));
+    // At most 5 days per run: each day is 7 SQL subrequests (Workers Free allows 50 per invocation).
+    ctx.waitUntil(rollup(env, uaClass, { maxDays: 5 }).catch((err) => console.error("stats rollup failed", err && err.message)));
   },
 };
 

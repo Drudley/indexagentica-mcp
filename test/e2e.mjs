@@ -4,6 +4,16 @@ const BASE = (process.env.BASE || "http://127.0.0.1:8787").replace(/\/$/, "");
 const RL_BASE = process.env.RL_BASE ? process.env.RL_BASE.replace(/\/$/, "") : null;
 const MODERN = "2026-07-28";
 
+// Our own traffic: every request is marked internal (header + UA) so it is excluded from /stats.
+// Callers can still override either header (e.g. tests that need a specific User-Agent).
+const rawFetch = globalThis.fetch;
+globalThis.fetch = (url, init = {}) => {
+  const headers = new Headers(init.headers || {});
+  if (!headers.has("x-indexagentica-internal")) headers.set("x-indexagentica-internal", "1");
+  if (!headers.has("user-agent")) headers.set("user-agent", "indexagentica-e2e/1");
+  return rawFetch(url, { ...init, headers });
+};
+
 let pass = 0;
 let fail = 0;
 async function check(name, fn) {
