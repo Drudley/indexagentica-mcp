@@ -225,7 +225,7 @@ await check("tools/list", async () => {
   const { body } = await rpcLegacy("tools/list", undefined, 4);
   const names = body.result.tools.map((t) => t.name);
   assert(["search", "get_entry", "get_content", "list_categories"].every((n) => names.includes(n)), names.join(","));
-  assert(body.result.tools.every((t) => t.inputSchema.type === "object" && t.outputSchema && t.annotations.readOnlyHint), "schemas");
+  assert(body.result.tools.every((t) => t.inputSchema.type === "object" && t.outputSchema && (t.annotations.readOnlyHint || t.name === "request_listing")), "schemas");
 });
 await check("tools/call search", async () => {
   const { body } = await rpcLegacy("tools/call", { name: "search", arguments: { query: "payments", limit: 3 } }, 5);
@@ -277,7 +277,7 @@ await check("server/discover", async () => {
 });
 await check("tools/list has caching hints", async () => {
   const { body } = await rpcModern("tools/list");
-  assert(body.result.tools.length === 4 && body.result.ttlMs > 0 && body.result.cacheScope === "public", "tools + ttl");
+  assert(body.result.tools.length === 5 && body.result.ttlMs > 0 && body.result.cacheScope === "public", "tools + ttl");
 });
 await check("tools/call search / get_entry / list_categories", async () => {
   const s = await rpcModern("tools/call", { name: "search", arguments: { query: "mcp", category: "mcp-servers", limit: 5 } });

@@ -146,7 +146,7 @@ test("get_content errors: bad type, wrong type, unknown id", async () => {
 test("get_entry still works and tool list includes get_content", async () => {
   assert.equal((await runGetEntry(ENV, null, { id: "exa-api" })).entry.id, "exa-api");
   const defs = toolDefinitions(["apis"]);
-  assert.deepEqual(defs.map((t) => t.name), ["search", "get_entry", "get_content", "list_categories"]);
+  assert.deepEqual(defs.map((t) => t.name), ["search", "get_entry", "get_content", "list_categories", "request_listing"]);
   assert.ok(defs[0].inputSchema.properties.type.enum.includes("skill"));
 });
 
@@ -249,7 +249,7 @@ test("GET /.well-known/mcp/server-card.json mirrors tools/list", async () => {
   assert.equal(res.status, 200);
   const card = await res.json();
   assert.equal(card.serverInfo.name, "indexagentica-mcp");
-  assert.equal(card.serverInfo.version, "0.1.0");
+  assert.equal(card.serverInfo.version, "0.2.0");
   assert.deepEqual(card.authentication, { required: false });
   assert.deepEqual(card.resources, []);
   assert.deepEqual(card.prompts, []);

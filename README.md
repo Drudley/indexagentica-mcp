@@ -1,10 +1,11 @@
 # indexagentica-mcp
 
-Read-only **remote MCP server** (Streamable HTTP) and **REST search API** for
+**Remote MCP server** (Streamable HTTP) and **REST search API** for
 [Index Agentica](https://indexagentica.com), the agent-first directory of skills,
 harnesses, MCP servers, tools, protocols and APIs, plus its long-form guides,
 comparisons, stacks and downloadable Agent Skills. Runs on **Cloudflare Workers
-(free plan)**, stateless, no Durable Objects, no auth, CORS open.
+(free plan)**, stateless, no Durable Objects, no auth, CORS open. Read-only except
+`request_listing` / `POST /v1/requests`, which queue a listing request for Curator review (D1).
 
 ## Install
 
@@ -37,6 +38,10 @@ The same Worker also answers at `https://indexagentica-mcp.indexagentica.workers
 | GET | `/v1/usage` | Alias of `/stats` (used by the site; less likely to be caught by content-blocker filters) |
 | POST | `/v1/e` | Alias of `/hit` (used by the site) |
 | POST | `/hit` | Site usage beacon from indexagentica.com's inline script (origin-checked, strictly validated, 204). See [Site beacons](#site-beacons-post-hit) |
+| POST | `/v1/requests` | Request a listing (same logic as the `request_listing` tool). JSON body `{wanted, category, url?, reason?, requester?}`; `201` new, `200` merged. See [Listing requests](#listing-requests) |
+| GET | `/v1/requests?status=&limit=` | Public most-requested list (sanitized; rejected hidden; `url` only for verified/listed) |
+| GET | `/v1/requests/admin?status=` | Curator: full queue (Bearer `REQUESTS_ADMIN_TOKEN`) |
+| POST | `/v1/requests/<id>/status` | Curator: `{status, entry_id?, note?}` or `{delete: true}` (Bearer token) |
 | GET | `/health` | Liveness (not rate limited) |
 
 Errors are always JSON: `{"error":{"status":400,"code":"bad_request","message":"..."}}`
@@ -50,6 +55,7 @@ Errors are always JSON: `{"error":{"status":400,"code":"bad_request","message":"
 | `get_entry` | `id` (kebab-case) | `{entry}` (the full entry per the [entry schema](https://indexagentica.com/schema/entry.schema.json) + `links` + `longform` back-references) |
 | `get_content` | `type` (`guide`\|`comparison`\|`stack`\|`skill`), `id`, `include_html?` | `{content}`: front matter, metadata, `markdown` (scheme links resolved to absolute URLs), `links`; comparisons add `comparison` (criteria, table, verdict), stacks add `stack` (use case, components), skills add `skill_md` (full SKILL.md) and `links.zip` / `links.skill_md` |
 | `list_categories` | none | `{total, generated, categories[{slug,name,description,count,html,json}]}` |
+| `request_listing` | `wanted` (≤120), `category` (category slug or `other`), `url?` (http(s), ≤300), `reason?` (≤500), `requester?` (≤60) | `{ok, id, merged, vote_counted, request{id,wanted,category,votes,status,first_seen,last_seen}, note, list}`. The only non-read-only tool (`readOnlyHint: false`, not destructive) |
 
 Every tool has a JSON-Schema `inputSchema`, an `outputSchema`, `readOnlyHint`
 annotations, and returns both `structuredContent` and the same JSON as a `text`
@@ -305,6 +311,26 @@ npm run deploy                     # -> https://mcp.indexagentica.com (custom do
 BASE=https://mcp.indexagentica.com npm run test:e2e
 ```
 
+## Listing requests
+
+Agents ask for missing listings via the `request_listing` tool or `POST /v1/requests` (shared code: `src/requests.js`).
+Storage: Cloudflare D1 database `indexagentica-requests` (binding `REQUESTS_DB`, schema in `migrations/`; apply with
+`CI=1 npx wrangler d1 migrations apply indexagentica-requests --remote`).
+
+- **Validation**: `wanted` ≤120 chars, `reason` ≤500, `requester` ≤60, `url` ≤300 and http(s) only (no credentials, no whitespace);
+  control and bidi-override characters rejected; unknown fields rejected; body ≤4 KiB; `category` must be a current category slug or `other`.
+- **Dedupe**: same `category` and same normalized `wanted` (lowercased, accents and punctuation stripped, whitespace collapsed,
+  filler words such as mcp/server/the/tool/skill/api dropped), or same URL host+path (any category) → merged into the existing request.
+  A merge adds one vote, at most one per client (IP hash, IPv6 by /64). Up to 10 reasons and requester names are kept (admin view only).
+- **Rate limit**: 5 per hour and 20 per day per client (keyed HMAC of IP (IPv6 by /48) + User-Agent), plus 20 per day per IP hash; `429` with `Retry-After`.
+  On top of the global 120/min limit. Submission rows are pruned after 2 days.
+- **Privacy**: raw IPs are never stored, only HMAC-SHA256 (truncated) with the secret `REQUESTS_IP_SALT`.
+- **Statuses**: `pending` → `verified` → `listed` (with `entry_id`), or `rejected`. Public output (`GET /v1/requests`) hides rejected items,
+  omits reasons/requesters, and includes `url` only for verified/listed items. Requests from our own agents are flagged `internal` (admin view).
+- **Curator**: admin routes need `Authorization: Bearer <REQUESTS_ADMIN_TOKEN>` (secret; local copy only on the shared box, never committed).
+  The site repo has `scripts/requests-review.mjs` (list / verify / listed / reject / delete) and the workflow in `content/README.md`.
+  Nothing is listed without verification.
+
 ## Layout
 
 ```
@@ -320,6 +346,8 @@ src/ua.js         human (browser) vs agent User-Agent classification
 src/hits.js       POST /hit: site beacon validation + logging (dataset indexagentica_hits)
 src/stats.js      GET /stats: Analytics Engine SQL aggregation, KV daily rollup (cron), caching
 src/internal.js   internal-traffic rules (header, UA, optional IP ranges)
+src/requests.js   listing requests: validation, dedupe, votes, rate limits, D1 queue, admin
+migrations/       D1 schema for indexagentica-requests
 test/             unit tests, E2E script, Inspector config
 docs/             proposed copy for llms.txt, /agents and the directory listing
 ```

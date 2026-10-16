@@ -82,3 +82,12 @@ namespace_id = "4299"
   [env.ratelimit-test.ratelimits.simple]
   limit = 5
   period = 10
+
+# Listing requests queue (src/requests.js). D1 free tier. Schema: migrations/.
+#   CI=1 npx wrangler d1 migrations apply indexagentica-requests --remote
+# Secrets: REQUESTS_ADMIN_TOKEN (curator admin routes), REQUESTS_IP_SALT (HMAC key for IP hashes).
+[[d1_databases]]
+binding = "REQUESTS_DB"
+database_name = "indexagentica-requests"
+database_id = "79ce0676-0ecc-4289-889a-c468c2eae828"
+migrations_dir = "migrations"

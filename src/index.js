@@ -10,6 +10,7 @@ import { handleHit } from "./hits.js";
 import { statsResponse, rollup, CACHE_SECONDS } from "./stats.js";
 import { uaClass } from "./ua.js";
 import { internalRule } from "./internal.js";
+import { submitRequest, listPublic, listAdmin, setStatus, isAdmin, RequestError, LIMITS } from "./requests.js";
 
 // Site beacon and public stats. The /v1/* aliases are what the site uses: less likely to match
 // content-blocker filter lists than /hit and /stats (which keep working).
@@ -60,7 +61,7 @@ function originAllowed(request, env) {
 export function serverCard(request, env) {
   return {
     serverInfo: { ...SERVER_INFO },
-    description: "Read-only search over the Index Agentica directory of agent tools, MCP servers, APIs, protocols and skills, plus guides, comparisons, stacks and downloadable skills.",
+    description: "Search over the Index Agentica directory of agent tools, MCP servers, APIs, protocols and skills, plus guides, comparisons, stacks and downloadable skills; agents can also request missing listings (request_listing).",
     instructions: INSTRUCTIONS,
     transport: { type: "streamable-http", url: `${baseUrl(request, env)}/mcp` },
     protocolVersions: SUPPORTED_VERSIONS,
@@ -78,7 +79,7 @@ function landing(request, env) {
   return {
     name: "Index Agentica MCP & search API",
     description:
-      "Read-only remote MCP server and REST search API for Index Agentica, an agent-first directory of skills, harnesses, MCP servers, tools, protocols and APIs, plus guides, comparisons, stacks and downloadable skills. No auth. CORS open.",
+      "Remote MCP server and REST search API for Index Agentica, an agent-first directory of skills, harnesses, MCP servers, tools, protocols and APIs, plus guides, comparisons, stacks and downloadable skills. No auth. CORS open. Read-only except request_listing / POST /v1/requests, which queues a listing request for Curator review.",
     version: SERVER_INFO.version,
     mcp: {
       endpoint: `${base}/mcp`,
@@ -97,6 +98,8 @@ function landing(request, env) {
       server_card: `${base}/.well-known/mcp/server-card.json`,
       stats: `${base}/stats`,
       stats_alias: `${base}/v1/usage`,
+      requests: `${base}/v1/requests`,
+      request_listing: `POST ${base}/v1/requests {wanted, category, url?, reason?, requester?}`,
     },
     rate_limit: {
       requests: Number(env.RATE_LIMIT_REQUESTS) || 120,
@@ -205,6 +208,10 @@ async function handle(request, env, ctx, url, path, log) {
       return errorJson(405, "method_not_allowed", "The MCP endpoint accepts POST only (stateless Streamable HTTP; no GET/SSE stream, no sessions).", {}, { allow: "POST, OPTIONS" });
     }
 
+    if (path === "/v1/requests" || path.startsWith("/v1/requests/")) {
+      return withRl(requestsRoute(request, env, ctx, url, path, method, log));
+    }
+
     if (method !== "GET" && method !== "HEAD") {
       return errorJson(405, "method_not_allowed", `${method} not allowed on ${path}`, {}, { allow: "GET, HEAD, OPTIONS" });
     }
@@ -265,4 +272,46 @@ async function handle(request, env, ctx, url, path, log) {
     }
 
     return errorJson(404, "not_found", `No route for ${path}. See / for the list of endpoints.`);
+}
+
+async function requestsRoute(request, env, ctx, url, path, method, log) {
+  try {
+    if (path === "/v1/requests") {
+      if (method === "POST") {
+        noteArgs(log, "request_listing", null);
+        const ct = request.headers.get("content-type") || "";
+        if (!/json|text\/plain/i.test(ct)) throw new RequestError(415, "unsupported_media_type", "Send a JSON body (content-type: application/json).");
+        const raw = await request.text();
+        if (raw.length > 4096) throw new RequestError(413, "too_large", "Body too large (max 4 KiB).");
+        let body;
+        try { body = JSON.parse(raw); } catch { throw new RequestError(400, "bad_request", "Body must be JSON."); }
+        const r = await submitRequest(env, ctx, request, body);
+        return json(r.merged ? 200 : 201, r, { "cache-control": "no-store" });
+      }
+      if (method === "GET" || method === "HEAD") {
+        noteArgs(log, "list_requests", null);
+        const lim = Number(url.searchParams.get("limit") || 100);
+        return json(200, { ...(await listPublic(env, { status: url.searchParams.get("status") || undefined, limit: lim })), limits: LIMITS }, { "cache-control": "public, max-age=60" });
+      }
+      return errorJson(405, "method_not_allowed", "GET or POST.", {}, { allow: "GET, POST, OPTIONS" });
+    }
+    // Curator admin routes (Bearer REQUESTS_ADMIN_TOKEN).
+    if (!isAdmin(request, env)) return errorJson(401, "unauthorized", "Admin token required.", {}, { "www-authenticate": "Bearer" });
+    if (path === "/v1/requests/admin" && method === "GET") {
+      return json(200, await listAdmin(env, url.searchParams.get("status") || "pending"), { "cache-control": "no-store" });
+    }
+    const m = /^\/v1\/requests\/(\d+)\/status$/.exec(path);
+    if (m && method === "POST") {
+      let body;
+      try { body = JSON.parse(await request.text()); } catch { throw new RequestError(400, "bad_request", "Body must be JSON."); }
+      return json(200, await setStatus(env, Number(m[1]), body), { "cache-control": "no-store" });
+    }
+    return errorJson(404, "not_found", `No route for ${method} ${path}.`);
+  } catch (err) {
+    if (err instanceof RequestError) {
+      const h = err.extra && err.extra.retry_after ? { "retry-after": String(err.extra.retry_after) } : {};
+      return errorJson(err.status, err.code, err.message, err.extra, h);
+    }
+    return errorJson(500, "internal_error", "Could not process the request.");
+  }
 }

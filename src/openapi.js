@@ -73,6 +73,36 @@ export function openapi(base) {
           responses: { 204: { description: "Counted" }, 400: { description: "Rejected (unknown event, path, id or host)" }, 403: { description: "Origin not allowed" } },
         },
       },
+      "/v1/requests": {
+        get: {
+          operationId: "listRequests",
+          summary: "Most-requested listings (public, sanitized): id, wanted, category, votes, status, first_seen, last_seen. Rejected requests are hidden; url only for verified/listed items.",
+          parameters: [
+            { name: "status", in: "query", schema: { type: "string", enum: ["pending", "verified", "listed", "rejected"] } },
+            { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 200, default: 100 } },
+          ],
+          responses: { 200: { description: "{generated, total, requests: [...]}" } },
+        },
+        post: {
+          operationId: "requestListing",
+          summary: "Request a listing (same logic as the MCP tool request_listing). Similar requests merge into one with a vote count (one vote per client). Nothing is listed until the Curator verifies it.",
+          description: "Limits: wanted <= 120 chars, reason <= 500, requester <= 60, url <= 300 and http(s) only; no control characters; body <= 4 KiB. Rate limit 5/hour and 20/day per client (IP hash + User-Agent); IPs are stored only as keyed hashes.",
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: {
+              type: "object", additionalProperties: false, required: ["wanted", "category"],
+              properties: {
+                wanted: { type: "string", maxLength: 120 },
+                category: { type: "string", description: "A category slug from /categories, or other" },
+                url: { type: "string", format: "uri", maxLength: 300 },
+                reason: { type: "string", maxLength: 500 },
+                requester: { type: "string", maxLength: 60 },
+              },
+            } } },
+          },
+          responses: { 201: { description: "New request queued" }, 200: { description: "Merged into an existing request (vote_counted tells whether a vote was added)" }, 400: { description: "Invalid input", content: { "application/json": { schema: err } } }, 429: { description: "Rate limited (Retry-After)" } },
+        },
+      },
       "/categories": { get: { operationId: "listCategories", summary: "List categories with counts", responses: { 200: { description: "Categories" } } } },
       "/mcp": { post: { operationId: "mcp", summary: "MCP Streamable HTTP endpoint (JSON-RPC 2.0)", responses: { 200: { description: "JSON-RPC response" }, 202: { description: "Notification accepted" } } } },
     },

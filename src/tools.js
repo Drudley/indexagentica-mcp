@@ -1,5 +1,6 @@
 // Tool definitions and implementations shared by MCP and REST.
 import { getData, publicEntry, getLongformItem, LONGFORM_TYPES, CONTENT_TYPES } from "./data.js";
+import { submitRequest, RequestError } from "./requests.js";
 import { search, suggestIds, DEFAULT_LIMIT, MAX_LIMIT, summarize } from "./search.js";
 
 const ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -180,6 +181,36 @@ export function toolDefinitions(categorySlugs = []) {
       },
       annotations: { title: "List categories", readOnlyHint: true, idempotentHint: true, destructiveHint: false, openWorldHint: false },
     },
+    {
+      name: "request_listing",
+      title: "Request a listing",
+      description:
+        "Ask Index Agentica to add something that is missing (a skill, agent harness, MCP server, tool, protocol, API, ...). Similar requests are merged into one with a vote count " +
+        "(one vote per client). Nothing is listed automatically: the Curator verifies each request first. The public queue is at https://mcp.indexagentica.com/v1/requests and https://indexagentica.com/requested/. " +
+        "Limits: 5 requests per hour and 20 per day per client. Search first to check it is not already listed.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          wanted: { type: "string", minLength: 1, maxLength: 120, description: "Short name of what is wanted, e.g. \"Linear MCP server\" or \"a skill for Terraform plans\"." },
+          category: { type: "string", enum: categorySlugs.length ? [...categorySlugs, "other"] : undefined, description: "Directory category slug, or \"other\"." + catHint },
+          url: { type: "string", maxLength: 300, format: "uri", description: "Optional http(s) link (repo, docs or homepage). Not shown publicly until verified." },
+          reason: { type: "string", maxLength: 500, description: "Optional: why it is useful / what you needed it for." },
+          requester: { type: "string", maxLength: 60, description: "Optional requesting agent or client name." },
+        },
+        required: ["wanted", "category"],
+        additionalProperties: false,
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean" }, id: { type: "integer" }, merged: { type: "boolean" }, vote_counted: { type: "boolean" },
+          request: { type: "object", properties: { id: { type: "integer" }, wanted: { type: "string" }, category: { type: "string" }, votes: { type: "integer" }, status: { type: "string", enum: ["pending", "verified", "listed", "rejected"] }, first_seen: { type: "string" }, last_seen: { type: "string" } } },
+          note: { type: "string" }, list: { type: "string" },
+        },
+        required: ["ok", "id", "merged", "request"],
+      },
+      annotations: { title: "Request a listing", readOnlyHint: false, idempotentHint: false, destructiveHint: false, openWorldHint: false },
+    },
   ];
 }
 
@@ -276,6 +307,20 @@ export const TOOL_IMPLS = {
   get_entry: runGetEntry,
   get_content: runGetContent,
   list_categories: runListCategories,
+  request_listing: runRequestListing,
 };
+
+async function runRequestListing(env, ctx, args, request) {
+  if (!request) throw new ToolInputError("request_listing needs an HTTP request context");
+  try {
+    return await submitRequest(env, ctx, request, args);
+  } catch (err) {
+    if (err instanceof RequestError) {
+      if (err.status >= 500) throw err;
+      throw new NotFoundError(err.message, { code: err.code, ...err.extra });
+    }
+    throw err;
+  }
+}
 
 export { summarize };

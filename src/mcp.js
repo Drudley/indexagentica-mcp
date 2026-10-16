@@ -15,7 +15,7 @@ import { getData } from "./data.js";
 export const SERVER_INFO = {
   name: "indexagentica-mcp",
   title: "Index Agentica",
-  version: "0.1.0",
+  version: "0.2.0",
   websiteUrl: "https://indexagentica.com",
 };
 export const MODERN_VERSIONS = ["2026-07-28"];
@@ -25,8 +25,8 @@ const LIST_TTL_MS = 10 * 60 * 1000;
 
 export const INSTRUCTIONS =
   "Index Agentica (https://indexagentica.com) is an agent-first directory of skills, agent harnesses, MCP servers, tools, protocols, APIs, information sources, finance/payment rails and other directories, plus long-form guides, comparisons, stacks and downloadable Agent Skills. " +
-  "Use `search` to find resources by keywords, type (entry, guide, comparison, stack, skill), category and tags; `get_entry` for the full record of one directory entry; `get_content` (type + id) for a guide, comparison, stack or skill with its markdown; `list_categories` for the category slugs and counts. " +
-  "Data is read-only, refreshed from the published site every ~10 minutes, and licensed CC BY 4.0. To add or correct an entry, see https://indexagentica.com/agents/#contribute.";
+  "Use `search` to find resources by keywords, type (entry, guide, comparison, stack, skill), category and tags; `get_entry` for the full record of one directory entry; `get_content` (type + id) for a guide, comparison, stack or skill with its markdown; `list_categories` for the category slugs and counts; `request_listing` to ask for something missing to be added (verified by the Curator before listing). " +
+  "Directory data is read-only, refreshed from the published site every ~10 minutes, and licensed CC BY 4.0. To add or correct an entry, see https://indexagentica.com/agents/#contribute.";
 
 const META_VERSION = "io.modelcontextprotocol/protocolVersion";
 
@@ -59,11 +59,11 @@ function decodeHeaderValue(v) {
 }
 
 /** Build the CallToolResult for a tool, never throwing for tool-level errors. */
-async function callTool(env, ctx, name, args) {
+async function callTool(env, ctx, name, args, request) {
   const impl = TOOL_IMPLS[name];
   if (!impl) return { rpcError: { code: ERR.INVALID_PARAMS, message: `Unknown tool: ${name}` } };
   try {
-    const structured = await impl(env, ctx, args || {});
+    const structured = await impl(env, ctx, args || {}, request);
     return {
       result: {
         content: [{ type: "text", text: JSON.stringify(structured, null, 2) }],
@@ -98,7 +98,7 @@ async function categorySlugs(env, ctx) {
  * Dispatch one JSON-RPC request. Returns { status, body } where body is the
  * JSON-RPC response object, or null for notifications (-> 202).
  */
-async function dispatch(env, ctx, msg, era, version, log = null) {
+async function dispatch(env, ctx, msg, era, version, log = null, request = null) {
   const { id, method } = msg;
   const params = msg.params && typeof msg.params === "object" ? msg.params : {};
   const modern = era === "modern";
@@ -143,7 +143,7 @@ async function dispatch(env, ctx, msg, era, version, log = null) {
     case "tools/call": {
       if (typeof params.name !== "string") return { status: 200, body: rpcError(id, ERR.INVALID_PARAMS, "params.name (string) is required") };
       if (log) noteArgs(log, params.name, params.arguments);
-      const r = await callTool(env, ctx, params.name, params.arguments);
+      const r = await callTool(env, ctx, params.name, params.arguments, request);
       if (log && r.result) {
         if (r.result.isError) { log.toolError = true; log.detail = "tool_error"; }
         const sc = r.result.structuredContent;
@@ -209,7 +209,7 @@ export async function handleMcpPost(request, env, ctx, json0, empty, log = null)
         out.push(rpcError(m && m.id, ERR.INVALID_REQUEST, "Invalid JSON-RPC request"));
         continue;
       }
-      out.push((await dispatch(env, ctx, m, "legacy", "2025-03-26")).body);
+      out.push((await dispatch(env, ctx, m, "legacy", "2025-03-26", null, request)).body);
       if (log) log.era = "legacy";
     }
     return out.length ? json(200, out) : empty(202);
@@ -273,6 +273,6 @@ export async function handleMcpPost(request, env, ctx, json0, empty, log = null)
     }
   }
 
-  const { status, body } = await dispatch(env, ctx, msg, era, version, log);
+  const { status, body } = await dispatch(env, ctx, msg, era, version, log, request);
   return json(status, body, era === "modern" ? { "mcp-protocol-version": version } : {});
 }
