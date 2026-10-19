@@ -141,7 +141,7 @@ test("totals: per-tool breakdown, unknown tools bucketed, legacy rows classified
   assert.equal(t.api.requests, 7);
   assert.deepEqual(t.api.by_operation, { get_entry: 3, other: 4 });
   assert.deepEqual(t.agent_vs_human, { agent: 6 + 3 + 3, human: 2 + 1 });
-  assert.deepEqual(t.site, { page_views: 7, outbound_clicks: 2, outbound_clicks_by_entry: { "exa-api": 2 }, downloads: { total: 1, zip: 1, skill_md: 0, by_skill: { "web-lookup": 1 } } });
+  assert.deepEqual(t.site, { page_views: 7, outbound_clicks: 2, outbound_clicks_by_entry: { "exa-api": 2 }, downloads: { total: 1, zip: 1, skill_md: 0, by_skill: { "web-lookup": 1 } }, direct_downloads: emptyTotals().site.direct_downloads });
   const sum = addTotals(t, t);
   assert.equal(sum.mcp.tool_calls_by_tool.search, 10);
   assert.equal(sum.site.downloads.zip, 2);
@@ -188,7 +188,9 @@ test("rollup stores settled UTC days once; all-time = stored days + live remaind
 test("GET /stats with the token: windows, since labels, definitions, cached", async () => {
   _resetStatsCache();
   sqlRows = byShape({
-    hits: [{ event: "pageview", kind: "", n: "3" }, { event: "download", kind: "zip", id: "indexagentica-lookup", n: "2" }],
+    hits: [{ event: "pageview", kind: "", n: "3" }, { event: "download", kind: "zip", id: "indexagentica-lookup", n: "2" },
+      { event: "direct", kind: "zip", id: "indexagentica-lookup", probe: "", n: "4" }, { event: "direct", kind: "skill_md", id: "web-lookup", probe: "", n: "1" },
+      { event: "direct", kind: "zip", id: "web-lookup", probe: "head", n: "3" }, { event: "direct", kind: "zip", id: "web-lookup", probe: "bot", n: "2" }],
     api: [{ route: "rest", method: "", tool: "search", cls: "human", n: "2" }],
     clients: [{ client: "Claude-Code", n: "5" }, { client: "rare<b>", n: "1" }],
     uas: [{ ua: "Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)", n: "4" }, { ua: "python-httpx/0.27", n: "2" }],
@@ -209,10 +211,12 @@ test("GET /stats with the token: windows, since labels, definitions, cached", as
   }
   const w = b.windows.all_time;
   assert.deepEqual(w.site.downloads.by_skill, { "indexagentica-lookup": 2 });
+  assert.deepEqual(w.site.direct_downloads, { total: 5, zip: 4, skill_md: 1, by_skill: { "indexagentica-lookup": 4, "web-lookup": 1 }, crawlers_and_probes: { total: 5, head: 3, bot: 2 } });
+  assert.deepEqual(w.site.skill_downloads, { total: 7, clicks: 2, direct: 5, by_skill: { "indexagentica-lookup": { total: 6, clicks: 2, direct: 4 }, "web-lookup": { total: 1, clicks: 0, direct: 1 } } });
   assert.deepEqual(w.mcp.top_clients, [{ client: "claude-code", requests: 5 }], "lowercased; names seen < 3 times hidden");
   assert.equal(w.mcp.clients, undefined, "raw client map not exposed");
   assert.deepEqual(w.top_user_agent_families, [{ family: "gptbot", requests: 4 }]);
-  assert.deepEqual(w.internal_excluded, { mcp_requests: 6, api_requests: 9, page_views: 1, outbound_clicks: 0, downloads: 0, by_rule: { header: 6, ua: 0, ip: 0, retroactive: 10 } });
+  assert.deepEqual(w.internal_excluded, { mcp_requests: 6, api_requests: 9, page_views: 1, outbound_clicks: 0, downloads: 0, direct_downloads: 0, by_rule: { header: 6, ua: 0, ip: 0, retroactive: 10 } });
   assert.equal(b.traffic, "outside");
   assert.ok(b.internal_rules.header && b.internal_rules.retroactive);
   assert.ok(b.since.site_beacon && b.since.mcp_api && b.definitions && b.caveats.length);
@@ -301,4 +305,53 @@ test("UA families and client-name sanitizing", () => {
   assert.equal(uaFamily("", uaClass), "(none)");
   assert.equal(cleanName("  Cursor <script>VS Code\n "), "cursor scriptvs code");
   assert.equal(cleanName("x".repeat(80)).length, 40);
+});
+
+// ---- direct skill downloads (src/downloads.js) ----
+import { matchSkillPath, probeOf, BOT_UA_RE } from "../src/downloads.js";
+
+test("skill download paths: strict slug, zip or SKILL.md only", () => {
+  assert.deepEqual(matchSkillPath("/skills/web-lookup.zip"), { id: "web-lookup", kind: "zip" });
+  assert.deepEqual(matchSkillPath("/skills/web-lookup/SKILL.md"), { id: "web-lookup", kind: "skill_md" });
+  for (const p of ["/skills/Web-Lookup.zip", "/skills/web--lookup.zip", "/skills/-x.zip", "/skills/a/b.zip", "/skills/x/skill.md", "/skills/x/scripts/a.sh", "/skills/%2e%2e.zip", "/skills/x.zip.exe", `/skills/${"a".repeat(65)}.zip`, "/skills/"]) {
+    assert.equal(matchSkillPath(p), null, p);
+  }
+  assert.equal(probeOf("HEAD", "curl/8"), "head");
+  assert.equal(probeOf("GET", "Mozilla/5.0 (compatible; GPTBot/1.2; +https://openai.com/gptbot)"), "bot");
+  assert.equal(probeOf("GET", "UptimeRobot/2.0"), "bot");
+  for (const ua of ["curl/8.5.0", "Claude-User/1.0", "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ChatGPT-User/1.0)", "python-httpx/0.27", ""]) assert.equal(probeOf("GET", ua), "", ua);
+  assert.ok(!BOT_UA_RE.test("claude-code/2.1"));
+});
+
+test("GET/HEAD /skills/<id>.zip|SKILL.md: record in HITS then 302 to the site; unknown -> 404, nothing stored", async () => {
+  const rec = recorder();
+  const env = { ...BASE_ENV, HITS: rec.HITS, ANALYTICS: rec.ANALYTICS };
+  const pts = rec.points;
+  const req = (p, init = {}) => worker.fetch(new Request(`https://mcp.test${p}`, init), env, {});
+  const r1 = await req("/skills/web-lookup.zip", { headers: { "user-agent": "curl/8.5.0", "cf-connecting-ip": "10.2.2.2" } });
+  assert.equal(r1.status, 302);
+  assert.equal(r1.headers.get("location"), `${SITE}/skills/web-lookup.zip`);
+  assert.equal(r1.headers.get("cache-control"), "no-store");
+  const r2 = await req("/skills/web-lookup/SKILL.md", { headers: { "user-agent": "Claude-User/1.0" } });
+  assert.equal(r2.headers.get("location"), `${SITE}/skills/web-lookup/SKILL.md`);
+  const r3 = await req("/skills/web-lookup.zip", { method: "HEAD", headers: { "user-agent": "curl/8" } });
+  assert.equal(r3.status, 302);
+  await req("/skills/web-lookup.zip", { headers: { "user-agent": "GPTBot/1.2" } });
+  await req("/skills/web-lookup.zip", { headers: { "x-indexagentica-internal": "1", "user-agent": "indexagentica-builder/1" } });
+  const p = pts;
+  assert.equal(p.length, 5);
+  assert.deepEqual(p[0], { indexes: ["hit:direct"], blobs: ["direct", "/skills/web-lookup.zip", "web-lookup", "", "zip", "agent", "", "outside", "", ""], doubles: [1] });
+  assert.equal(p[1].blobs[4], "skill_md");
+  assert.equal(p[2].blobs[9], "head");
+  assert.equal(p[3].blobs[9], "bot");
+  assert.deepEqual([p[4].blobs[7], p[4].blobs[8]], ["internal", "header"]);
+  assert.equal(HIT_BLOBS.length + 1, p[0].blobs.length, "HITS columns + probe");
+  // Not a skill (a guide id), unknown, malformed, wrong method: no redirect, nothing stored.
+  for (const path of ["/skills/add-mcp.zip", "/skills/nope.zip", "/skills/nope/SKILL.md", "/skills/WEB-LOOKUP.zip", "/skills/web-lookup/scripts/x.sh", "/skills/..%2Fevil.zip"]) {
+    const r = await req(path);
+    assert.equal(r.status, 404, path);
+    assert.equal(r.headers.get("location"), null, path);
+  }
+  assert.equal((await req("/skills/web-lookup.zip", { method: "POST" })).status, 405);
+  assert.equal(pts.length, 5, "rejected requests store nothing");
 });

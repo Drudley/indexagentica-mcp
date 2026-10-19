@@ -52,11 +52,28 @@ export function openapi(base) {
           responses: { 200: { description: "Item (see LongformItem in https://indexagentica.com/openapi.json); skills include skill_md" }, 400: { description: "Bad request", content: { "application/json": { schema: err } } }, 404: { description: "Not found, with suggestions", content: { "application/json": { schema: err } } } },
         },
       },
+      "/skills/{id}.zip": {
+        get: {
+          operationId: "downloadSkillZip",
+          summary: "Download a published skill as a zip: counts one direct download, then 302 to https://indexagentica.com/skills/{id}.zip",
+          description: "HEAD requests and crawler/monitor User-Agents are counted separately (crawlers_and_probes), our own traffic is excluded. Unknown ids return 404. Use curl -L to follow the redirect.",
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength: 64 } }],
+          responses: { 302: { description: "Redirect to the static zip (Location header)" }, 404: { description: "No published skill with that id", content: { "application/json": { schema: err } } } },
+        },
+      },
+      "/skills/{id}/SKILL.md": {
+        get: {
+          operationId: "downloadSkillMd",
+          summary: "Download a published skill's raw SKILL.md: counts one direct download, then 302 to https://indexagentica.com/skills/{id}/SKILL.md",
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$", maxLength: 64 } }],
+          responses: { 302: { description: "Redirect to the static SKILL.md (Location header)" }, 404: { description: "No published skill with that id", content: { "application/json": { schema: err } } } },
+        },
+      },
       "/.well-known/mcp/server-card.json": { get: { operationId: "getServerCard", summary: "Static MCP server card (serverInfo, authentication, tools, resources, prompts), generated from the tool definitions", responses: { 200: { description: "Server card" } } } },
       "/stats": {
         get: {
           operationId: "getStats",
-          summary: "Public usage stats (outside traffic only): site page views, outbound clicks (by entry), skill downloads (by skill), MCP tool calls (per tool), top MCP clients, REST requests, top User-Agent families and the agent/human split, for the last 24h, last 7 days and all time since the stated `since` timestamps. Cached 10 minutes.",
+          summary: "Public usage stats (outside traffic only): site page views, outbound clicks (by entry), skill downloads (site clicks, direct downloads via /skills/* on this host, and their total, by skill), MCP tool calls (per tool), top MCP clients, REST requests, top User-Agent families and the agent/human split, for the last 24h, last 7 days and all time since the stated `since` timestamps. Cached 10 minutes.",
           description: "Also served at /v1/usage (alias used by the site). Our own traffic (header X-Indexagentica-Internal: 1, User-Agent containing indexagentica, or a configured IP range; earlier rows matched retroactively) is excluded and reported as internal_excluded; see internal_rules in the response.",
           responses: {
             200: { description: "`status: ok` with `windows.last_24h|last_7d|all_time`, or `status: collecting` (no numbers yet) when aggregation is not configured" },

@@ -3,7 +3,8 @@
 // Sources (Workers Analytics Engine, queried through the SQL API with the
 // CF_ANALYTICS_TOKEN secret, Account Analytics Read):
 //   indexagentica_mcp   one row per MCP / REST request (src/analytics.js)
-//   indexagentica_hits  one row per site beacon (src/hits.js)
+//   indexagentica_hits  one row per site beacon (src/hits.js) and per direct skill download
+//                       (src/downloads.js, event "direct", blob10 = probe: ''|head|bot)
 // Counts always use SUM(_sample_interval), never COUNT(), because Analytics Engine
 // may sample. Analytics Engine keeps 3 months, so all-time = per-UTC-day totals
 // stored in KV (binding STATS_KV, key day:YYYY-MM-DD) + a live query for the days
@@ -62,12 +63,16 @@ export const HITS_INTERNAL = `(blob8 = 'internal' OR ${HITS_RETRO})`;
 
 export function emptyTotals() {
   return {
-    site: { page_views: 0, outbound_clicks: 0, outbound_clicks_by_entry: {}, downloads: { total: 0, zip: 0, skill_md: 0, by_skill: {} } },
+    site: {
+      page_views: 0, outbound_clicks: 0, outbound_clicks_by_entry: {},
+      downloads: { total: 0, zip: 0, skill_md: 0, by_skill: {} }, // clicks on the site (beacon)
+      direct_downloads: { total: 0, zip: 0, skill_md: 0, by_skill: {}, crawlers_and_probes: { total: 0, head: 0, bot: 0 } }, // GET /skills/* on this host
+    },
     mcp: { requests: 0, tool_calls: 0, tool_calls_by_tool: {}, by_client: { agent: 0, human: 0 }, clients: {} },
     api: { requests: 0, by_operation: {}, by_client: { agent: 0, human: 0 } },
     agent_vs_human: { agent: 0, human: 0 },
     user_agent_families: {},
-    internal_excluded: { mcp_requests: 0, api_requests: 0, page_views: 0, outbound_clicks: 0, downloads: 0, by_rule: { header: 0, ua: 0, ip: 0, retroactive: 0 } },
+    internal_excluded: { mcp_requests: 0, api_requests: 0, page_views: 0, outbound_clicks: 0, downloads: 0, direct_downloads: 0, by_rule: { header: 0, ua: 0, ip: 0, retroactive: 0 } },
   };
 }
 
@@ -139,6 +144,16 @@ export function totalsFromRows({ api = [], legacy = [], hits = [], clients = [],
       t.site.downloads.total += c;
       if (r.kind === "zip" || r.kind === "skill_md") t.site.downloads[r.kind] += c;
       if (ID_OK.test(r.id || "")) bump(t.site.downloads.by_skill, r.id, c);
+    } else if (r.event === "direct") {
+      const dd = t.site.direct_downloads;
+      if (r.probe === "head" || r.probe === "bot") {
+        dd.crawlers_and_probes.total += c;
+        dd.crawlers_and_probes[r.probe] += c;
+        continue;
+      }
+      dd.total += c;
+      if (r.kind === "zip" || r.kind === "skill_md") dd[r.kind] += c;
+      if (ID_OK.test(r.id || "")) bump(dd.by_skill, r.id, c);
     }
   }
   for (const r of clients) { const k = cleanName(r.client); if (k) bump(t.mcp.clients, k, n(r.n)); }
@@ -151,7 +166,7 @@ export function totalsFromRows({ api = [], legacy = [], hits = [], clients = [],
   }
   for (const r of internalHits) {
     const c = n(r.n);
-    const key = r.event === "pageview" ? "page_views" : r.event === "click" ? "outbound_clicks" : r.event === "download" ? "downloads" : null;
+    const key = r.event === "pageview" ? "page_views" : r.event === "click" ? "outbound_clicks" : r.event === "download" ? "downloads" : r.event === "direct" ? "direct_downloads" : null;
     if (!key) continue;
     ex[key] += c;
     bump(ex.by_rule, ["header", "ua", "ip"].includes(r.rule) ? r.rule : "retroactive", c);
@@ -182,7 +197,7 @@ export async function queryTotals(env, cond, classify) {
   const S = "SUM(_sample_interval) AS n";
   const [api, hits, clients, uas, internalApi, internalHits] = await Promise.all([
     sql(env, `SELECT blob1 AS route, blob3 AS method, blob4 AS tool, blob17 AS cls, ${S} FROM ${MCP_DS} WHERE ${out} GROUP BY route, method, tool, cls FORMAT JSON`),
-    sql(env, `SELECT blob1 AS event, blob5 AS kind, blob3 AS id, ${S} FROM ${HITS_DS} WHERE ${hout} GROUP BY event, kind, id FORMAT JSON`),
+    sql(env, `SELECT blob1 AS event, blob5 AS kind, blob3 AS id, blob10 AS probe, ${S} FROM ${HITS_DS} WHERE ${hout} GROUP BY event, kind, id, probe FORMAT JSON`),
     sql(env, `SELECT blob5 AS client, ${S} FROM ${MCP_DS} WHERE ${out} AND blob1 = 'mcp' AND blob5 != '' GROUP BY client ORDER BY n DESC LIMIT ${KEEP_PER_DAY} FORMAT JSON`),
     sql(env, `SELECT blob7 AS ua, ${S} FROM ${MCP_DS} WHERE ${out} GROUP BY ua ORDER BY n DESC LIMIT 500 FORMAT JSON`),
     sql(env, `SELECT blob1 AS route, blob19 AS rule, ${S} FROM ${MCP_DS} WHERE ${cond} AND ${API_INTERNAL} GROUP BY route, rule FORMAT JSON`),
@@ -251,13 +266,26 @@ export async function allTime(env, classify, now = Date.now()) {
 const topList = (m, key) => Object.entries(m || {}).filter(([, c]) => c >= TOP_MIN).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, TOP_N).map(([name, c]) => ({ [key]: name, requests: c }));
 const sortMap = (m) => Object.fromEntries(Object.entries(m || {}).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)));
 
+/** Skill downloads overall and per skill: site clicks + direct downloads (probes not included). */
+export function skillDownloads(site) {
+  const clicks = (site && site.downloads) || {}, direct = (site && site.direct_downloads) || {};
+  const by = {};
+  for (const [id, c] of Object.entries(clicks.by_skill || {})) (by[id] ||= { total: 0, clicks: 0, direct: 0 }).clicks += n(c);
+  for (const [id, c] of Object.entries(direct.by_skill || {})) (by[id] ||= { total: 0, clicks: 0, direct: 0 }).direct += n(c);
+  for (const v of Object.values(by)) v.total = v.clicks + v.direct;
+  const sorted = Object.fromEntries(Object.entries(by).sort((a, b) => b[1].total - a[1].total || (a[0] < b[0] ? -1 : 1)));
+  return { total: n(clicks.total) + n(direct.total), clicks: n(clicks.total), direct: n(direct.total), by_skill: sorted };
+}
+
 /** Public shape of one window: full maps become ranked top lists; nothing raw is exposed. */
 export function presentWindow(t) {
   const { clients, ...mcp } = t.mcp;
   const { user_agent_families, ...rest } = t;
+  const dd = addTotals(emptyTotals().site.direct_downloads, t.site.direct_downloads || {}); // days stored before direct downloads existed
+  const site = { ...t.site, direct_downloads: { ...dd, by_skill: sortMap(dd.by_skill) } };
   return {
     ...rest,
-    site: { ...t.site, outbound_clicks_by_entry: sortMap(t.site.outbound_clicks_by_entry), downloads: { ...t.site.downloads, by_skill: sortMap(t.site.downloads.by_skill) } },
+    site: { ...site, outbound_clicks_by_entry: sortMap(t.site.outbound_clicks_by_entry), downloads: { ...t.site.downloads, by_skill: sortMap(t.site.downloads.by_skill) }, skill_downloads: skillDownloads(site) },
     mcp: { ...mcp, top_clients: topList(clients, "client") },
     top_user_agent_families: topList(user_agent_families, "family"),
   };
@@ -277,12 +305,15 @@ export function collectingBody(env, base, message) {
 const DEFINITIONS = {
   "site.page_views": "Page views reported by the site's inline beacon (browsers with JavaScript; skipped for navigator.webdriver, Do Not Track and Global Privacy Control).",
   "site.outbound_clicks": "Clicks on a listing's outbound links (website, repo, docs, sources) on its entry page.",
-  "site.downloads": "Clicks on skill downloads (zip or raw SKILL.md) on the site. Direct downloads (curl, agents) are not counted.",
+  "site.downloads": "Clicks on skill downloads (zip or raw SKILL.md) on the site (browser beacon). Direct downloads are in site.direct_downloads.",
+  "site.direct_downloads": "Direct skill downloads: GET requests to https://mcp.indexagentica.com/skills/<id>.zip or /skills/<id>/SKILL.md (the links in llms.txt, the JSON API and MCP get_content), which then redirect to the static file. Counted since the route went live (2026-10-19). HEAD requests and crawler / link-checker / monitor User-Agents are not downloads; they are counted in crawlers_and_probes (head, bot). Fetching the static files on indexagentica.com directly is not counted.",
+  "site.skill_downloads": "Total skill downloads = site.downloads (clicks) + site.direct_downloads (excluding crawlers_and_probes), overall and by skill. A click on the site that is then fetched through a counted link is not double-counted, because the site's own buttons link to the static files.",
   "mcp.requests": "All POST /mcp requests (initialize, tools/list, tools/call, ...).",
   "mcp.tool_calls": "MCP tools/call requests, by tool.",
   "api.requests": "REST/JSON requests to the search API (search, get_entry, get_content, list_content, list_categories, other = landing, OpenAPI, server card, entry list, errors). /stats, /hit and /health are not counted.",
   agent_vs_human: "MCP + REST requests split by User-Agent: browser user agents count as human, everything else as agent/programmatic.",
   "site.downloads.by_skill": "Skill download clicks by skill id.",
+  "site.direct_downloads.by_skill": "Direct skill downloads by skill id.",
   "site.outbound_clicks_by_entry": "Outbound link clicks by listing id.",
   "mcp.top_clients": `Most frequent MCP client names (clientInfo.name sent on initialize, self-reported, lowercased and stripped to [a-z0-9._ -]); top ${TOP_N}, only names seen at least ${TOP_MIN} times.`,
   top_user_agent_families: `MCP + REST requests by User-Agent family (bot/crawler name, "browser", "headless-chrome", or the first product token); top ${TOP_N}, only families seen at least ${TOP_MIN} times.`,
@@ -342,7 +373,7 @@ export async function statsResponse(request, env, ctx, base, classify) {
   }
   if (memo && now - memo.at < memo.ttl * 1000) return memo;
   let cache = null;
-  const key = new Request(`${base}/stats?__v=${ROLLUP_VERSION}`, { method: "GET" });
+  const key = new Request(`${base}/stats?__v=${ROLLUP_VERSION}.dl`, { method: "GET" });
   try { cache = typeof caches !== "undefined" ? caches.default : null; } catch { cache = null; }
   if (cache) {
     try {

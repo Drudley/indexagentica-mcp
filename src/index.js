@@ -10,6 +10,7 @@ import { handleHit } from "./hits.js";
 import { statsResponse, rollup, CACHE_SECONDS } from "./stats.js";
 import { uaClass } from "./ua.js";
 import { internalRule } from "./internal.js";
+import { matchSkillPath, handleSkillDownload } from "./downloads.js";
 import { submitRequest, listPublic, listAdmin, setStatus, isAdmin, RequestError, LIMITS } from "./requests.js";
 
 // Site beacon and public stats. The /v1/* aliases are what the site uses: less likely to match
@@ -93,6 +94,8 @@ function landing(request, env) {
       entry: `${base}/entries/{id}`,
       content: `${base}/content/{type}/{id}`,
       content_list: `${base}/content?type={guide|comparison|stack|skill}`,
+      skill_zip: `${base}/skills/{id}.zip`,
+      skill_md: `${base}/skills/{id}/SKILL.md`,
       categories: `${base}/categories`,
       openapi: `${base}/openapi.json`,
       server_card: `${base}/.well-known/mcp/server-card.json`,
@@ -136,7 +139,8 @@ export default {
     const path = url.pathname.replace(/\/+$/, "") || "/";
     // One Analytics Engine data point per request, except preflights, unmetered housekeeping,
     // site beacons (/hit, logged to their own dataset) and /stats (fetched by every site footer).
-    const skip = request.method.toUpperCase() === "OPTIONS" || ["/health", "/favicon.ico", "/robots.txt", ...HIT_PATHS, ...STATS_PATHS].includes(path);
+    // Skill downloads (/skills/...) are recorded in the HITS dataset instead (src/downloads.js).
+    const skip = request.method.toUpperCase() === "OPTIONS" || ["/health", "/favicon.ico", "/robots.txt", ...HIT_PATHS, ...STATS_PATHS].includes(path) || path.startsWith("/skills/");
     const log = skip ? null : newLog(request, path);
     if (log) log.rule = internalRule(request, env);
     const res = await handle(request, env, ctx, url, path, log);
@@ -169,6 +173,13 @@ async function handle(request, env, ctx, url, path, log) {
       return path === "/robots.txt"
         ? new Response("User-agent: *\nAllow: /\n", { headers: { "content-type": "text/plain", ...CORS } })
         : empty(404);
+    }
+
+    // Direct skill downloads: record, then 302 to the static file on the site. Unknown ids -> 404.
+    if (path.startsWith("/skills/")) {
+      const sk = matchSkillPath(path);
+      if (!sk) return errorJson(404, "not_found", "Skill downloads are /skills/<id>.zip and /skills/<id>/SKILL.md (lowercase slug ids).");
+      return handleSkillDownload(request, env, ctx, sk, path, (status, body, h = {}) => json(status, body, { "cache-control": "no-store", ...h }), CORS);
     }
 
     // Site beacons and public stats: own rate-limit counters, no request log in the API dataset.

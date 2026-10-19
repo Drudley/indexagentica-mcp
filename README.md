@@ -37,6 +37,7 @@ The same Worker also answers at `https://indexagentica-mcp.indexagentica.workers
 | GET | `/stats` | Public usage stats (JSON): site page views, outbound clicks, skill downloads, MCP tool calls per tool, REST requests, agent/human split; last 24h, last 7 days, all time since the `since` timestamps. Cached 10 min. See [Usage stats](#usage-stats-get-stats) |
 | GET | `/v1/usage` | Alias of `/stats` (used by the site; less likely to be caught by content-blocker filters) |
 | POST | `/v1/e` | Alias of `/hit` (used by the site) |
+| GET, HEAD | `/skills/{id}.zip`, `/skills/{id}/SKILL.md` | Direct skill download: records one download, then `302` to the static file on indexagentica.com. Unknown ids `404`. See [Direct skill downloads](#direct-skill-downloads-get-skillsid) |
 | POST | `/hit` | Site usage beacon from indexagentica.com's inline script (origin-checked, strictly validated, 204). See [Site beacons](#site-beacons-post-hit) |
 | POST | `/v1/requests` | Request a listing (same logic as the `request_listing` tool). JSON body `{wanted, category, url?, reason?, requester?}`; `201` new, `200` merged. See [Listing requests](#listing-requests) |
 | GET | `/v1/requests?status=&limit=` | Public most-requested list (sanitized; rejected hidden; `url` only for verified/listed) |
@@ -169,7 +170,24 @@ to the separate dataset **`indexagentica_hits`** (binding `HITS`), index `hit:<e
 | `blob7` | country (from `request.cf`) |
 | `blob8` | traffic: `internal` / `outside` (empty before 2026-10-12) |
 | `blob9` | internal rule: `header`, `ua`, `ip` |
+| `blob10` | probe (event `direct` only): empty for a counted download, `head` or `bot` |
 | `double1` | 1 |
+
+### Direct skill downloads (`GET /skills/<id>`)
+
+Agents fetch skills with curl and never run the site's beacon, so the download links published for
+agents (llms.txt, llms-full.txt, `/api/longform*.json`, MCP `get_content` links) point at this host:
+`https://mcp.indexagentica.com/skills/<id>.zip` and `https://mcp.indexagentica.com/skills/<id>/SKILL.md`.
+The Worker ([`src/downloads.js`](src/downloads.js)) checks `<id>` against `^[a-z0-9]+(-[a-z0-9]+)*$`
+(max 64) and the published skills in the site's `/api/longform.json` (cached 10 min); anything else is
+`404`, and the `Location` is always built from `DATA_BASE_URL`, so it is not an open redirect. It writes
+one row to `indexagentica_hits` (event `direct`, index `hit:direct`, same columns; `blob2` is the
+request path) and answers `302` with `Cache-Control: no-store`. `HEAD` requests and crawler / link
+checker / monitor User-Agents (`BOT_UA_RE`) are stored with `blob10` = `head` / `bot` and reported as
+`site.direct_downloads.crawlers_and_probes`, not as downloads. Internal traffic is flagged as usual.
+The route has its own rate-limit counter (`dl:`); over the limit the redirect still works but the
+request is not recorded. The site's own HTML download buttons keep linking to the static files and
+are counted by the click beacon (`site.downloads`); `site.skill_downloads` = clicks + direct.
 
 ### Usage stats (`GET /stats`)
 
@@ -186,6 +204,8 @@ published (anything else is `unknown_tool`). Responses are cached 10 minutes (Ca
 `{"status":"collecting", ...}` with no numbers; if the SQL API fails, `503 {"status":"unavailable"}`.
 
 Every window counts **outside traffic only** and adds: `site.downloads.by_skill`,
+`site.direct_downloads` (total, zip, skill_md, by_skill, crawlers_and_probes), `site.skill_downloads`
+(total = clicks + direct, overall and per skill as `{total, clicks, direct}`),
 `site.outbound_clicks_by_entry`, `mcp.top_clients` (self-reported MCP client names, lowercased and
 stripped to `[a-z0-9._ -]`, top 10, only names seen ≥ 3 times), `top_user_agent_families` (bot name,
 `browser`, `headless-chrome` or first product token; top 10, ≥ 3) and `internal_excluded` (what was left
@@ -344,6 +364,7 @@ src/openapi.js    OpenAPI document for the REST API
 src/analytics.js  per-request usage logging to Workers Analytics Engine (no-op without the binding)
 src/ua.js         human (browser) vs agent User-Agent classification
 src/hits.js       POST /hit: site beacon validation + logging (dataset indexagentica_hits)
+src/downloads.js  GET/HEAD /skills/<id>.zip|SKILL.md: direct download count + 302 to the site
 src/stats.js      GET /stats: Analytics Engine SQL aggregation, KV daily rollup (cron), caching
 src/internal.js   internal-traffic rules (header, UA, optional IP ranges)
 src/requests.js   listing requests: validation, dedupe, votes, rate limits, D1 queue, admin

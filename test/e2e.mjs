@@ -167,7 +167,7 @@ await check("GET /content/{type}/{id} + MCP get_content", async () => {
     assert(typeof h.body.html === "string", "include_html");
     const m = await rpcLegacy("tools/call", { name: "get_content", arguments: { type: x.type, id: x.id } }, 30);
     assert(!m.body.result.isError && m.body.result.structuredContent.content.id === x.id, `MCP ${x.type}/${x.id}`);
-    const s = await rpcLegacy("tools/call", { name: "search", arguments: { query: x.title, type: x.type, limit: 5 } }, 31);
+    const s = await rpcLegacy("tools/call", { name: "search", arguments: { query: x.name || x.title, type: x.type, limit: 5 } }, 31);
     assert(s.body.result.structuredContent.results.some((y) => y.id === x.id), `search finds ${x.id}`);
   }
   const nf = await get("/content/guide/nope-nope");
@@ -176,6 +176,21 @@ await check("GET /content/{type}/{id} + MCP get_content", async () => {
   const bad = await rpcLegacy("tools/call", { name: "get_content", arguments: { type: "guide", id: "nope-nope" } }, 32);
   assert(bad.body.result.isError, "MCP unknown -> isError");
   console.log(`       fetched: ${[...seen].join(", ") || "(none published)"}`);
+});
+
+await check("GET/HEAD /skills/<id>.zip + /SKILL.md -> 302 to the site (internal, not counted); unknown -> 404", async () => {
+  const skill = lfItems.find((x) => x.type === "skill");
+  const nf = await fetch(`${BASE}/skills/no-such-skill-xyz.zip`, { redirect: "manual" });
+  assert(nf.status === 404 && !nf.headers.get("location"), `unknown id -> 404 (got ${nf.status})`);
+  assert((await fetch(`${BASE}/skills/Bad_Id.zip`, { redirect: "manual" })).status === 404, "bad slug -> 404");
+  if (!skill) return;
+  for (const [suffix, file] of [[".zip", `/skills/${skill.id}.zip`], ["/SKILL.md", `/skills/${skill.id}/SKILL.md`]]) {
+    for (const method of ["GET", "HEAD"]) {
+      const r = await fetch(`${BASE}/skills/${skill.id}${suffix}`, { method, redirect: "manual" });
+      const loc = r.headers.get("location") || "";
+      assert(r.status === 302 && loc.endsWith(file) && /^https?:\/\//.test(loc), `${method} ${suffix}: ${r.status} ${loc}`);
+    }
+  }
 });
 
 await check("GET /.well-known/mcp/server-card.json", async () => {
