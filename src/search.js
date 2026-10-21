@@ -12,14 +12,29 @@ export function tokenize(q) {
     .filter((t) => t.length > 0);
 }
 
+// Word lists for id/name, cached on the prepared search fields.
+function words(s) {
+  if (!s._w) {
+    const nameWords = tokenize(s.name);
+    const idWords = tokenize(s.id);
+    s._w = { nameWords, idWords, name: nameWords.join(" "), id: idWords.join(" ") };
+  }
+  return s._w;
+}
+
 function scoreEntry(s, tokens, phrase) {
   let score = 0;
   let matched = 0;
+  const w = words(s);
   for (const t of tokens) {
     let ts = 0;
     if (s.id === t || s.name === t) ts += 12;
     if (s.id.split("-").includes(t)) ts += 6;
     if (s.name.includes(t)) ts += 5;
+    // Whole-word and leading-word hits in the name/id beat substring and
+    // summary/tag-only hits ("github" -> "GitHub MCP Server" over "DeepWiki").
+    if (w.nameWords.includes(t)) ts += 4;
+    if (w.nameWords[0] === t || w.idWords[0] === t) ts += 3;
     if (s.tags.includes(t)) ts += 4;
     else if (s.tags.some((tag) => tag.includes(t))) ts += 2;
     if (s.category.includes(t)) ts += 1.5;
@@ -34,6 +49,11 @@ function scoreEntry(s, tokens, phrase) {
   }
   if (tokens.length > 0) {
     if (matched === 0) return 0;
+    // Exact id/name match of the whole query wins outright; an id/name that
+    // starts with the whole query comes next.
+    const q = tokens.join(" ");
+    if (w.id === q || w.name === q) score += 30;
+    else if (w.id.startsWith(q + " ") || w.name.startsWith(q + " ")) score += 6;
     score *= matched / tokens.length; // favour entries that match every term
   }
   return Math.round(score * 100) / 100;

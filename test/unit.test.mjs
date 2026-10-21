@@ -260,3 +260,36 @@ test("GET /.well-known/mcp/server-card.json mirrors tools/list", async () => {
   for (const t of card.tools) assert.ok(t.description && t.inputSchema.type === "object", t.name);
   assert.deepEqual(card.tools.find((t) => t.name === "get_content"), tools.find((t) => t.name === "get_content"));
 });
+
+test("search boosts exact, leading and whole-word id/name matches over summary/tag-only hits", () => {
+  const index = {
+    entries: [
+      { id: "deepwiki-mcp", name: "DeepWiki MCP", category: "mcp-servers", summary: "Ask questions about any public GitHub repo; GitHub docs for agents.", description: "Indexes GitHub repositories.", tags: ["mcp", "documentation", "github", "code-search"] },
+      { id: "awesome-mcp-servers", name: "Awesome MCP Servers", category: "information", summary: "Curated GitHub list of MCP servers.", tags: ["mcp", "awesome-list", "github"] },
+      { id: "github-mcp-server", name: "GitHub MCP Server", category: "mcp-servers", summary: "Official MCP server for repos, issues and PRs.", tags: ["mcp", "github"] },
+      { id: "github-copilot-cli", name: "GitHub Copilot CLI", category: "harnesses", summary: "Terminal coding agent.", tags: ["coding-agent", "cli"] },
+      { id: "promptfoo-action", name: "Promptfoo GitHub Action", category: "evals-observability", summary: "Run evals in CI.", tags: ["evals", "github-actions"] },
+      { id: "finch-mcp", name: "Finch MCP", category: "mcp-servers", summary: "MCP server for the Finch platform.", tags: ["mcp"] },
+      { id: "finch-notes", name: "Notes", category: "tools", summary: "Notes app, from the finch team, with a finch tag.", tags: ["finch", "notes"] },
+      { id: "giskard", name: "Giskard", category: "evals-observability", summary: "LLM testing and red teaming.", tags: ["red-teaming", "evals"] },
+    ],
+  };
+  const lfIndex = { items: [
+    { type: "comparison", id: "llm-red-teaming-tools", title: "LLM red-teaming tools compared", summary: "Red teaming tools for LLM apps.", tags: ["red-teaming"], entries: ["giskard"], links: {} },
+  ] };
+  const d = prepare(index, lfIndex);
+  const ids = (q) => search(d, { query: q, limit: 50 }).results.map((x) => x.id);
+
+  const gh = ids("github");
+  const rank = (id) => gh.indexOf(id);
+  for (const id of ["github-mcp-server", "github-copilot-cli", "promptfoo-action"]) assert.ok(rank(id) < rank("deepwiki-mcp"), `${id} above deepwiki-mcp: ${gh}`);
+  assert.ok(rank("github-mcp-server") < rank("awesome-mcp-servers"));
+  assert.deepEqual(gh.slice(0, 2).sort(), ["github-copilot-cli", "github-mcp-server"]);
+
+  assert.equal(ids("github mcp server")[0], "github-mcp-server");
+  assert.equal(ids("GitHub MCP Server")[0], "github-mcp-server");
+  assert.equal(ids("deepwiki mcp")[0], "deepwiki-mcp");
+  assert.equal(ids("finch")[0], "finch-mcp");
+  assert.equal(ids("red teaming")[0], "llm-red-teaming-tools");
+  assert.ok(ids("red teaming").includes("giskard"));
+});
