@@ -8,7 +8,7 @@
 //
 // GET/DELETE on the endpoint -> 405 (allowed by every revision).
 
-import { toolDefinitions, TOOL_IMPLS, ToolInputError, NotFoundError } from "./tools.js";
+import { toolDefinitions, TOOL_IMPLS, ToolInputError, NotFoundError, canonicalToolName, unknownToolError } from "./tools.js";
 import { noteClient, noteArgs } from "./analytics.js";
 import { getData } from "./data.js";
 
@@ -60,8 +60,12 @@ function decodeHeaderValue(v) {
 
 /** Build the CallToolResult for a tool, never throwing for tool-level errors. */
 async function callTool(env, ctx, name, args, request) {
-  const impl = TOOL_IMPLS[name];
-  if (!impl) return { rpcError: { code: ERR.INVALID_PARAMS, message: `Unknown tool: ${name}` } };
+  const canonical = canonicalToolName(name);
+  const impl = canonical && TOOL_IMPLS[canonical];
+  if (!impl) {
+    const { message, data } = unknownToolError(name);
+    return { rpcError: { code: ERR.INVALID_PARAMS, message, data } };
+  }
   try {
     const structured = await impl(env, ctx, args || {}, request);
     return {
@@ -144,12 +148,14 @@ async function dispatch(env, ctx, msg, era, version, log = null, request = null)
       if (typeof params.name !== "string") return { status: 200, body: rpcError(id, ERR.INVALID_PARAMS, "params.name (string) is required") };
       if (log) noteArgs(log, params.name, params.arguments);
       const r = await callTool(env, ctx, params.name, params.arguments, request);
+      if (log && !r.rpcError && canonicalToolName(params.name) !== params.name) log.detail = `alias:${canonicalToolName(params.name)}`;
+      if (log && r.rpcError) log.detail = "unknown_tool";
       if (log && r.result) {
         if (r.result.isError) { log.toolError = true; log.detail = "tool_error"; }
         const sc = r.result.structuredContent;
         if (sc && Number.isFinite(sc.total)) log.resultCount = sc.total;
       }
-      if (r.rpcError) return { status: 200, body: rpcError(id, r.rpcError.code, r.rpcError.message) };
+      if (r.rpcError) return { status: 200, body: rpcError(id, r.rpcError.code, r.rpcError.message, r.rpcError.data) };
       return ok(r.result);
     }
     default:
@@ -176,7 +182,7 @@ function validRequest(msg) {
 export async function handleMcpPost(request, env, ctx, json0, empty, log = null) {
   // Wrap the response builder so JSON-RPC errors are recorded for usage logging.
   const json = (status, b, h) => {
-    if (log && b && !Array.isArray(b) && b.error) { log.rpcError = true; log.detail = String(b.error.code); }
+    if (log && b && !Array.isArray(b) && b.error) { log.rpcError = true; log.detail = log.detail || String(b.error.code); }
     return json0(status, b, h);
   };
   const raw = await request.text();

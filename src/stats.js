@@ -20,7 +20,9 @@ export const DEFAULT_API_SINCE = "2026-10-02T20:21:47Z"; // first deploy with re
 const MCP_DS = "indexagentica_mcp";
 const HITS_DS = "indexagentica_hits";
 const ROLLUP_VERSION = 3; // v2: internal traffic excluded, breakdowns added; v3: retro rule without the colo gate (older days are recomputed)
-const KNOWN_TOOLS = ["search", "get_entry", "get_content", "list_categories"];
+// Canonical tool names + unadvertised aliases come from src/tools.js so the stats can't drift
+// from the server (request_listing was missing here, so its calls were bucketed as unknown_tool).
+import { canonicalToolName } from "./tools.js";
 const KNOWN_OPS = ["search", "get_entry", "get_content", "list_content", "list_categories"];
 const TOP_N = 10;
 const TOP_MIN = 3; // client names / UA families are only published once seen this many times
@@ -118,7 +120,7 @@ export function totalsFromRows({ api = [], legacy = [], hits = [], clients = [],
     if (route === "mcp" && r.method === "tools/call") {
       t.mcp.tool_calls += c;
       // Only the server's own tool names are published; anything a client invents is bucketed.
-      bump(t.mcp.tool_calls_by_tool, KNOWN_TOOLS.includes(r.tool) ? r.tool : "unknown_tool", c);
+      bump(t.mcp.tool_calls_by_tool, canonicalToolName(r.tool) || "unknown_tool", c);
     }
     if (route === "api") bump(t.api.by_operation, KNOWN_OPS.includes(r.tool) ? r.tool : "other", c);
     if (r.cls === "human" || r.cls === "agent") {
@@ -188,6 +190,26 @@ export async function sql(env, query) {
   let j;
   try { j = JSON.parse(text); } catch { throw new StatsError("Analytics Engine SQL API returned non-JSON"); }
   return Array.isArray(j.data) ? j.data : [];
+}
+
+/**
+ * Admin diagnostics (GET /v1/admin/tool-calls, Bearer REQUESTS_ADMIN_TOKEN): outside tools/call
+ * rows of the last `hours` grouped by requested tool name and client, so unknown names can be
+ * investigated without exposing them on the public /stats.
+ */
+export async function toolCallBreakdown(env, hours = 48, now = Date.now()) {
+  const h = Math.min(Math.max(Math.round(Number(hours) || 48), 1), 24 * 90);
+  const cond = `timestamp >= ${sqlTime(now - h * 3600000)} AND blob1 = 'mcp' AND blob3 = 'tools/call' AND NOT ${API_INTERNAL}`;
+  const rows = await sql(env, `SELECT blob4 AS tool, blob5 AS client, blob6 AS client_version, blob7 AS ua, blob10 AS outcome, blob11 AS detail, SUM(_sample_interval) AS n, MIN(timestamp) AS first, MAX(timestamp) AS last FROM ${MCP_DS} WHERE ${cond} GROUP BY tool, client, client_version, ua, outcome, detail ORDER BY n DESC LIMIT 500 FORMAT JSON`);
+  const by_tool = {};
+  const unknown = [];
+  for (const r of rows) {
+    const c = n(r.n);
+    const canon = canonicalToolName(r.tool);
+    bump(by_tool, r.tool || "(empty)", c);
+    if (canon !== r.tool) unknown.push({ tool: r.tool, resolves_to: canon, client: r.client, client_version: r.client_version, ua: r.ua, outcome: r.outcome, detail: r.detail, n: c, first: r.first, last: r.last });
+  }
+  return { hours: h, generated: new Date(now).toISOString(), by_tool, non_canonical: unknown, rows: rows.length };
 }
 
 /** Totals for one time condition (SQL WHERE fragment): outside traffic, plus what was excluded. */

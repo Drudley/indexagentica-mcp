@@ -324,3 +324,80 @@ async function runRequestListing(env, ctx, args, request) {
 }
 
 export { summarize };
+
+// ---- tool-name resolution (unknown names, aliases, suggestions) ----
+
+export const TOOL_NAMES = Object.keys(TOOL_IMPLS);
+
+/**
+ * Unadvertised aliases: names real clients were observed calling (Analytics Engine,
+ * /v1/admin/tool-calls) that map unambiguously to one tool. Never listed in tools/list
+ * or the server card; the original requested name is still what gets logged.
+ */
+export const TOOL_ALIASES = Object.freeze({});
+
+// Common synonyms -> the tool to suggest (suggestions only, never executed).
+const SYNONYMS = {
+  search: ["search_index", "search_directory", "search_entries", "search_catalog", "find", "lookup", "query", "list", "list_entries", "browse", "discover", "search_tools", "search_resources", "find_entries"],
+  get_entry: ["entry", "get", "fetch", "fetch_entry", "lookup_entry", "get_resource", "get_tool", "get_server", "read_entry", "show_entry", "describe", "details", "get_details"],
+  get_content: ["content", "get_guide", "get_comparison", "get_stack", "get_skill", "read_content", "fetch_content", "get_article", "read_guide", "get_page"],
+  list_categories: ["categories", "get_categories", "category_list", "list_category", "list_types", "get_category"],
+  request_listing: ["request", "request_entry", "submit", "submit_listing", "suggest", "suggest_entry", "add_entry", "add_listing", "submit_entry"],
+};
+const SYNONYM_TO = new Map(Object.entries(SYNONYMS).flatMap(([t, l]) => l.map((s) => [s, t])));
+
+/** Lowercase, separators -> "_", strip a client namespace prefix such as "mcp__indexagentica__" or "indexagentica.". */
+export function normalizeToolName(name) {
+  let s = String(name || "").trim().toLowerCase().replace(/[\s\-./:]+/g, "_").replace(/[^a-z0-9_]/g, "");
+  s = s.replace(/^(?:mcp_+)?(?:index_?agentica(?:_?mcp)?_+)/, "").replace(/^_+|_+$/g, "").replace(/_+/g, "_");
+  return s;
+}
+
+function editDistance(a, b) {
+  if (a === b) return 0;
+  const m = a.length, n = b.length;
+  if (!m || !n) return m || n;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[n];
+}
+
+/** Canonical tool for a requested name: exact name or explicit alias; otherwise null. */
+export function canonicalToolName(name) {
+  if (typeof name !== "string") return null;
+  if (Object.prototype.hasOwnProperty.call(TOOL_IMPLS, name)) return name;
+  if (Object.prototype.hasOwnProperty.call(TOOL_ALIASES, name)) return TOOL_ALIASES[name];
+  return null;
+}
+
+/** Best guess for an unknown name (suggestion only): normalized exact, synonym, or edit distance <= 2. */
+export function suggestTool(name) {
+  const s = normalizeToolName(name);
+  if (!s) return null;
+  if (TOOL_NAMES.includes(s)) return s;
+  if (SYNONYM_TO.has(s)) return SYNONYM_TO.get(s);
+  let best = null, bestD = Infinity, tie = false;
+  for (const t of TOOL_NAMES) {
+    const d = editDistance(s, t);
+    if (d < bestD) { best = t; bestD = d; tie = false; } else if (d === bestD) tie = true;
+  }
+  if (bestD <= 2 && !tie) return best;
+  // Singular/plural and verb-prefixed forms, e.g. "category" / "get_search" / "searches".
+  for (const t of TOOL_NAMES) {
+    const core = t.replace(/^(get|list|request)_/, "");
+    if (s === core || s === `${core}s` || s.replace(/^(get|list|run|do|call)_/, "") === t) return t;
+  }
+  return null;
+}
+
+/** Message + data for an unknown tool (JSON-RPC -32602, per the MCP spec). */
+export function unknownToolError(name) {
+  const suggestion = suggestTool(name);
+  const shown = String(name).slice(0, 80);
+  const message = `Unknown tool: ${shown}. Valid tools: ${TOOL_NAMES.join(", ")}.` + (suggestion ? ` Did you mean "${suggestion}"?` : "") + " Call tools/list for their input schemas.";
+  return { message, data: { requested: shown, valid_tools: TOOL_NAMES, ...(suggestion ? { suggestion } : {}) } };
+}

@@ -7,7 +7,7 @@ import { getData } from "./data.js";
 import { openapi } from "./openapi.js";
 import { newLog, noteArgs, writeLog } from "./analytics.js";
 import { handleHit } from "./hits.js";
-import { statsResponse, rollup, CACHE_SECONDS } from "./stats.js";
+import { statsResponse, rollup, CACHE_SECONDS, toolCallBreakdown, StatsError } from "./stats.js";
 import { uaClass } from "./ua.js";
 import { internalRule } from "./internal.js";
 import { matchSkillPath, handleSkillDownload } from "./downloads.js";
@@ -221,6 +221,17 @@ async function handle(request, env, ctx, url, path, log) {
 
     if (path === "/v1/requests" || path.startsWith("/v1/requests/")) {
       return withRl(requestsRoute(request, env, ctx, url, path, method, log));
+    }
+
+    // Admin diagnostics (Bearer REQUESTS_ADMIN_TOKEN): requested tool names incl. unknown ones.
+    if (path === "/v1/admin/tool-calls") {
+      if (!isAdmin(request, env)) return errorJson(401, "unauthorized", "Admin token required.", {}, { "www-authenticate": "Bearer" });
+      if (method !== "GET") return errorJson(405, "method_not_allowed", "GET only.", {}, { allow: "GET, OPTIONS" });
+      try {
+        return json(200, await toolCallBreakdown(env, url.searchParams.get("hours") || 48), { "cache-control": "no-store" });
+      } catch (err) {
+        return errorJson(502, "analytics_error", err instanceof StatsError ? err.message.slice(0, 120) : "Analytics query failed.");
+      }
     }
 
     if (method !== "GET" && method !== "HEAD") {
