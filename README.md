@@ -43,6 +43,7 @@ The same Worker also answers at `https://indexagentica-mcp.indexagentica.workers
 | GET | `/v1/requests?status=&limit=` | Public most-requested list (sanitized; rejected hidden; `url` only for verified/listed) |
 | GET | `/v1/requests/admin?status=` | Curator: full queue (Bearer `REQUESTS_ADMIN_TOKEN`) |
 | POST | `/v1/requests/<id>/status` | Curator: `{status, entry_id?, note?}` or `{delete: true}` (Bearer token) |
+| GET | `/v1/admin/tool-calls?hours=48` | Admin: outside `tools/call` counts by requested tool name and client, incl. unknown names (Bearer token; not on /stats) |
 | GET | `/health` | Liveness (not rate limited) |
 
 Errors are always JSON: `{"error":{"status":400,"code":"bad_request","message":"..."}}`
@@ -61,7 +62,13 @@ Errors are always JSON: `{"error":{"status":400,"code":"bad_request","message":"
 Every tool has a JSON-Schema `inputSchema`, an `outputSchema`, `readOnlyHint`
 annotations, and returns both `structuredContent` and the same JSON as a `text`
 content block. Bad arguments and unknown ids come back as `isError: true` tool
-results (so the model can correct itself); an unknown tool name is JSON-RPC `-32602`.
+results (so the model can correct itself); an unknown tool name is JSON-RPC `-32602`
+whose message lists the valid tools and, when one is a clear match (client namespace
+prefixes such as `mcp__indexagentica__search`, synonyms such as `search_index`/`find`,
+typos within edit distance 2), suggests it: `error.data = {requested, valid_tools, suggestion?}`.
+Suggestions are never executed. Explicit aliases (`TOOL_ALIASES` in `src/tools.js`) are only
+added for unambiguous names real clients were observed calling, are not advertised in
+`tools/list`, and the originally requested name is what gets logged (`detail = alias:<tool>`).
 
 Scoring: per query word, exact id/name match 12, id segment 6, name substring 5,
 exact tag 4 (partial tag 2), summary 2, category 1.5, description 1; +8 if the

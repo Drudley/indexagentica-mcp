@@ -293,3 +293,64 @@ test("search boosts exact, leading and whole-word id/name matches over summary/t
   assert.equal(ids("red teaming")[0], "llm-red-teaming-tools");
   assert.ok(ids("red teaming").includes("giskard"));
 });
+
+// ---- unknown tool names: suggestions, aliases, helpful -32602 ----
+import { suggestTool, normalizeToolName, canonicalToolName, unknownToolError, TOOL_NAMES, TOOL_ALIASES } from "../src/tools.js";
+import { handleMcpPost } from "../src/mcp.js";
+
+test("normalizeToolName strips client namespaces and separators", () => {
+  assert.equal(normalizeToolName("mcp__indexagentica__search"), "search");
+  assert.equal(normalizeToolName("indexagentica.get-entry"), "get_entry");
+  assert.equal(normalizeToolName("IndexAgentica_MCP__list_categories"), "list_categories");
+  assert.equal(normalizeToolName("  Search Index "), "search_index");
+});
+
+test("suggestTool: namespaced, synonyms, typos, plurals; nothing for probes", () => {
+  const cases = {
+    mcp__indexagentica__search: "search", indexagentica_search: "search", search_index: "search", find: "search",
+    lookup: "search", search_entries: "search", fetch: "get_entry", getentry: "get_entry", get_entrys: "get_entry",
+    "get-entry": "get_entry", get_guide: "get_content", categories: "list_categories", list_catgories: "list_categories",
+    category: "list_categories", submit_listing: "request_listing", serch: "search",
+  };
+  for (const [name, want] of Object.entries(cases)) assert.equal(suggestTool(name), want, name);
+  for (const name of ["sentinel-no-such-tool", "sentinel.no-such-tool", "__verifymcp_auth_probe_8ab5fac6f15acc55_", "", "zzz"]) {
+    assert.equal(suggestTool(name), null, name);
+  }
+});
+
+test("canonicalToolName: exact names and explicit aliases only", () => {
+  for (const t of TOOL_NAMES) assert.equal(canonicalToolName(t), t);
+  assert.equal(canonicalToolName("find"), null, "synonyms are suggestions, not aliases");
+  assert.equal(canonicalToolName("search_index", { search_index: "search" }), "search");
+  assert.equal(canonicalToolName("x", { x: "not_a_tool" }), null, "alias to a missing tool is ignored");
+  assert.equal(canonicalToolName(42), null);
+  assert.equal(canonicalToolName("toString"), null, "no prototype keys");
+  for (const [a, t] of Object.entries(TOOL_ALIASES)) assert.ok(TOOL_NAMES.includes(t), `${a} -> ${t}`);
+});
+
+test("unknownToolError lists valid tools and the suggestion", () => {
+  const e = unknownToolError("search_index");
+  assert.match(e.message, /^Unknown tool: search_index\. Valid tools: search, get_entry, get_content, list_categories, request_listing\. Did you mean "search"\?/);
+  assert.deepEqual(e.data, { requested: "search_index", valid_tools: TOOL_NAMES, suggestion: "search" });
+  const p = unknownToolError("sentinel-no-such-tool");
+  assert.equal(p.data.suggestion, undefined);
+  assert.doesNotMatch(p.message, /Did you mean/);
+  assert.equal(unknownToolError("x".repeat(500)).data.requested.length, 80);
+});
+
+test("MCP tools/call with an unknown tool -> -32602 with valid_tools; logs the requested name; tools/list unchanged", async () => {
+  const mk = (body) => new Request("https://mcp.test/mcp", { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream" }, body: JSON.stringify(body) });
+  const json = (status, body) => new Response(JSON.stringify(body), { status });
+  const empty = (status) => new Response(null, { status });
+  const log = { method: "", tool: "", detail: "" };
+  const res = await handleMcpPost(mk({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "mcp__indexagentica__search", arguments: { query: "x" } } }), {}, {}, json, empty, log);
+  const b = await res.json();
+  assert.equal(b.error.code, -32602);
+  assert.equal(b.error.data.suggestion, "search");
+  assert.deepEqual(b.error.data.valid_tools, TOOL_NAMES);
+  assert.equal(log.tool, "mcp__indexagentica__search");
+  assert.equal(log.detail, "unknown_tool");
+  assert.equal(log.rpcError, true);
+  const names = toolDefinitions().map((t) => t.name);
+  assert.deepEqual(names, TOOL_NAMES, "tools/list advertises only canonical tools");
+});

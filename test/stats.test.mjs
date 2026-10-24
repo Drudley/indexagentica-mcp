@@ -128,6 +128,7 @@ test("totals: per-tool breakdown, unknown tools bucketed, legacy rows classified
     [
       { route: "mcp", method: "tools/call", tool: "search", cls: "agent", n: "5" },
       { route: "mcp", method: "tools/call", tool: "<script>x", cls: "agent", n: "1" },
+      { route: "mcp", method: "tools/call", tool: "request_listing", cls: "agent", n: "2" },
       { route: "mcp", method: "initialize", tool: "", cls: "human", n: "2" },
       { route: "rest", method: "", tool: "get_entry", cls: "agent", n: "3" },
       { route: "rest", method: "", tool: "", cls: "", n: "4" },
@@ -135,12 +136,12 @@ test("totals: per-tool breakdown, unknown tools bucketed, legacy rows classified
     legacy: [{ route: "rest", ua: "curl/8", n: "3" }, { route: "rest", ua: "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0", n: "1" }],
     hits: [{ event: "pageview", kind: "", n: "7" }, { event: "click", kind: "", id: "exa-api", n: "2" }, { event: "download", kind: "zip", id: "web-lookup", n: "1" }],
   }, uaClass);
-  assert.equal(t.mcp.requests, 8);
-  assert.equal(t.mcp.tool_calls, 6);
-  assert.deepEqual(t.mcp.tool_calls_by_tool, { search: 5, unknown_tool: 1 });
+  assert.equal(t.mcp.requests, 10);
+  assert.equal(t.mcp.tool_calls, 8);
+  assert.deepEqual(t.mcp.tool_calls_by_tool, { search: 5, unknown_tool: 1, request_listing: 2 });
   assert.equal(t.api.requests, 7);
   assert.deepEqual(t.api.by_operation, { get_entry: 3, other: 4 });
-  assert.deepEqual(t.agent_vs_human, { agent: 6 + 3 + 3, human: 2 + 1 });
+  assert.deepEqual(t.agent_vs_human, { agent: 6 + 2 + 3 + 3, human: 2 + 1 });
   assert.deepEqual(t.site, { page_views: 7, outbound_clicks: 2, outbound_clicks_by_entry: { "exa-api": 2 }, downloads: { total: 1, zip: 1, skill_md: 0, by_skill: { "web-lookup": 1 } }, direct_downloads: emptyTotals().site.direct_downloads });
   const sum = addTotals(t, t);
   assert.equal(sum.mcp.tool_calls_by_tool.search, 10);

@@ -263,6 +263,9 @@ await check("tools/call invalid args -> isError, unknown tool -> -32602", async 
   assert(a.body.result.isError === true, "isError for bad arg");
   const b = await rpcLegacy("tools/call", { name: "nope", arguments: {} }, 10);
   assert(b.body.error.code === -32602, "unknown tool");
+  assert(Array.isArray(b.body.error.data.valid_tools) && b.body.error.data.valid_tools.includes("search"), "valid_tools listed");
+  const c = await rpcLegacy("tools/call", { name: "search_index", arguments: { query: "mcp" } }, 10);
+  assert(c.body.error.code === -32602 && c.body.error.data.suggestion === "search" && /Did you mean "search"/.test(c.body.error.message), "suggestion");
 });
 await check("unknown method -> -32601; parse error -> 400; GET /mcp -> 405", async () => {
   const a = await rpcLegacy("resources/list", undefined, 11);

@@ -334,6 +334,8 @@ export const TOOL_NAMES = Object.keys(TOOL_IMPLS);
  * /v1/admin/tool-calls) that map unambiguously to one tool. Never listed in tools/list
  * or the server card; the original requested name is still what gets logged.
  */
+// 2026-10-24 review (48h): every outside unknown name was a deliberate conformance probe
+// (sentinel-no-such-tool, sentinel.no-such-tool, __verifymcp_auth_probe_*), so none qualify yet.
 export const TOOL_ALIASES = Object.freeze({});
 
 // Common synonyms -> the tool to suggest (suggestions only, never executed).
@@ -341,7 +343,7 @@ const SYNONYMS = {
   search: ["search_index", "search_directory", "search_entries", "search_catalog", "find", "lookup", "query", "list", "list_entries", "browse", "discover", "search_tools", "search_resources", "find_entries"],
   get_entry: ["entry", "get", "fetch", "fetch_entry", "lookup_entry", "get_resource", "get_tool", "get_server", "read_entry", "show_entry", "describe", "details", "get_details"],
   get_content: ["content", "get_guide", "get_comparison", "get_stack", "get_skill", "read_content", "fetch_content", "get_article", "read_guide", "get_page"],
-  list_categories: ["categories", "get_categories", "category_list", "list_category", "list_types", "get_category"],
+  list_categories: ["categories", "category", "get_categories", "category_list", "list_category", "list_types", "get_category"],
   request_listing: ["request", "request_entry", "submit", "submit_listing", "suggest", "suggest_entry", "add_entry", "add_listing", "submit_entry"],
 };
 const SYNONYM_TO = new Map(Object.entries(SYNONYMS).flatMap(([t, l]) => l.map((s) => [s, t])));
@@ -367,10 +369,10 @@ function editDistance(a, b) {
 }
 
 /** Canonical tool for a requested name: exact name or explicit alias; otherwise null. */
-export function canonicalToolName(name) {
+export function canonicalToolName(name, aliases = TOOL_ALIASES) {
   if (typeof name !== "string") return null;
   if (Object.prototype.hasOwnProperty.call(TOOL_IMPLS, name)) return name;
-  if (Object.prototype.hasOwnProperty.call(TOOL_ALIASES, name)) return TOOL_ALIASES[name];
+  if (Object.prototype.hasOwnProperty.call(aliases, name) && TOOL_IMPLS[aliases[name]]) return aliases[name];
   return null;
 }
 
