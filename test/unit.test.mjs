@@ -354,3 +354,41 @@ test("MCP tools/call with an unknown tool -> -32602 with valid_tools; logs the r
   const names = toolDefinitions().map((t) => t.name);
   assert.deepEqual(names, TOOL_NAMES, "tools/list advertises only canonical tools");
 });
+
+// ---- self-hosting: no optional bindings or secrets (SELF_HOSTING.md) ----
+import { publicBase } from "../src/requests.js";
+
+test("self-hosted Worker without ANALYTICS, HITS, STATS_KV, REQUESTS_DB, RATE_LIMITER or secrets degrades gracefully", async () => {
+  const env = { ...ENV }; // DATA_BASE_URL + vars only
+  for (const k of ["ANALYTICS", "HITS", "STATS_KV", "REQUESTS_DB", "RATE_LIMITER", "CF_ANALYTICS_TOKEN", "CF_ACCOUNT_ID", "REQUESTS_ADMIN_TOKEN"]) assert.equal(env[k], undefined, k);
+  const ok = async (path, init) => { const r = await worker.fetch(req(path, init), env, { waitUntil() {} }); return [r.status, r.headers.get("content-type") && /json/.test(r.headers.get("content-type")) ? await r.json() : null, r]; };
+  assert.equal((await ok("/search?q=web"))[0], 200);
+  assert.equal((await ok("/categories"))[0], 200);
+  const ls = (await worker.fetch(rpc({ jsonrpc: "2.0", id: 1, method: "tools/list" }), env, {})).status;
+  assert.equal(ls, 200);
+  const [st, stats] = await ok("/stats");
+  assert.equal(st, 200);
+  assert.equal(stats.status, "collecting", "no analytics token -> collecting, not an error");
+  const [rq, rqb] = await ok("/v1/requests");
+  assert.equal(rq, 503);
+  assert.equal(rqb.error.code, "unavailable", "no D1 -> 503 unavailable");
+  const call = await (await worker.fetch(rpc({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "request_listing", arguments: { wanted: "x", category: "tools" } } }), env, {})).json();
+  assert.equal(call.result.isError, true, "request_listing without D1 is a tool error, not a crash");
+  const [ad] = await ok("/v1/admin/tool-calls", { headers: { authorization: "Bearer " + "a".repeat(40) } });
+  assert.equal(ad, 401, "no admin token configured -> nobody is admin");
+  const [, , dl] = await ok("/skills/no-such-skill.zip");
+  assert.equal(dl.status, 404);
+  // Scheduled rollup is a no-op without KV / token.
+  let waited = null;
+  await worker.scheduled({}, env, { waitUntil(p) { waited = p; } });
+  await waited;
+});
+
+test("admin tool-calls without analytics config -> 503 not_configured; publicBase follows PUBLIC_BASE_URL or the request origin", async () => {
+  const tok = "t".repeat(40);
+  const res = await worker.fetch(req("/v1/admin/tool-calls", { headers: { authorization: `Bearer ${tok}` } }), { ...ENV, REQUESTS_ADMIN_TOKEN: tok }, {});
+  assert.equal(res.status, 503);
+  assert.equal((await res.json()).error.code, "not_configured");
+  assert.equal(publicBase({}, new Request("https://my-mcp.example.workers.dev/v1/requests")), "https://my-mcp.example.workers.dev");
+  assert.equal(publicBase({ PUBLIC_BASE_URL: "https://mcp.example.org/" }, new Request("https://x.test/")), "https://mcp.example.org");
+});

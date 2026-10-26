@@ -1,0 +1,4 @@
+# Local secrets for `wrangler dev` (cp .dev.vars.example .dev.vars; .dev.vars is git-ignored).
+# Generate values with: openssl rand -hex 32
+REQUESTS_ADMIN_TOKEN=REPLACE_WITH_32_PLUS_RANDOM_CHARS
+REQUESTS_IP_SALT=REPLACE_WITH_RANDOM_SALT

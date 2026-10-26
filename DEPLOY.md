@@ -1,3 +1,7 @@
+> **These are the maintainers' own deployment notes** for `mcp.indexagentica.com` (our Cloudflare
+> account, zone and DNS). They are not a self-hosting guide: to run your own copy from a fresh clone,
+> see [SELF_HOSTING.md](SELF_HOSTING.md).
+
 # Deploying indexagentica-mcp (target: `mcp.indexagentica.com`)
 
 **Status (2026-10-02): deployed.** The `indexagentica.com` zone is active on Cloudflare

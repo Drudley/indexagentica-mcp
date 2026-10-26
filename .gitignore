@@ -6,3 +6,4 @@ dist
 *.pem
 *.key
 .mcpregistry_*
+mirror/

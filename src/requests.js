@@ -102,6 +102,12 @@ const pushCapped = (json, v) => {
 };
 
 /** Create or merge a request. Never stores the raw IP. */
+/** This server's public base (PUBLIC_BASE_URL, else the request origin), so self-hosted copies link to themselves. */
+export function publicBase(env, request) {
+  if (env && env.PUBLIC_BASE_URL) return String(env.PUBLIC_BASE_URL).replace(/\/+$/, "");
+  try { return new URL(request.url).origin; } catch { return "https://mcp.indexagentica.com"; }
+}
+
 export async function submitRequest(env, ctx, request, args) {
   const D = db(env);
   const input = await validateInput(env, ctx, args);
@@ -160,7 +166,7 @@ export async function submitRequest(env, ctx, request, args) {
     note: merged
       ? (counted ? "Merged into an existing request; your vote was added." : "Merged into an existing request; this client already voted for it.")
       : "Queued for review. The Curator verifies every request before anything is listed.",
-    list: "https://mcp.indexagentica.com/v1/requests",
+    list: `${publicBase(env, request)}/v1/requests`,
   };
 }
 

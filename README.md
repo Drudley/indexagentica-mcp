@@ -7,6 +7,8 @@ comparisons, stacks and downloadable Agent Skills. Runs on **Cloudflare Workers
 (free plan)**, stateless, no Durable Objects, no auth, CORS open. Read-only except
 `request_listing` / `POST /v1/requests`, which queue a listing request for Curator review (D1).
 
+**Self-hosting:** see [SELF_HOSTING.md](SELF_HOSTING.md) to run your own copy from a fresh clone (template config, your own KV/D1, your own data mirror, local and remote smoke tests). `wrangler.toml` and [DEPLOY.md](DEPLOY.md) are the maintainers' own deployment.
+
 ## Install
 
 Remote server: no install, no API key. Streamable HTTP at `https://mcp.indexagentica.com/mcp` (live).
@@ -326,8 +328,8 @@ Bindings: `ANALYTICS` and `HITS` (Analytics Engine), `STATS_KV` (KV), `RATE_LIMI
 
 ## Deploy
 
-See **[DEPLOY.md](DEPLOY.md)** for the options for `mcp.indexagentica.com` and the
-exact Cloudflare/GoDaddy access needed. Short version:
+To run your own copy, follow **[SELF_HOSTING.md](SELF_HOSTING.md)**. **[DEPLOY.md](DEPLOY.md)** contains our own deployment notes for `mcp.indexagentica.com` (the options and the
+exact Cloudflare/GoDaddy access needed). Short version, for our deployment:
 
 ```bash
 export CLOUDFLARE_ACCOUNT_ID=...   # from the Cloudflare dashboard

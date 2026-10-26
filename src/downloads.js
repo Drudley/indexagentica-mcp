@@ -47,8 +47,10 @@ export function directDataPoint({ id, kind, path }, ua, cf = {}, rule = "", prob
   };
 }
 
+const siteOf = (env) => (env.DATA_BASE_URL || "https://indexagentica.com").replace(/\/+$/, "");
+
 export function targetUrl(env, { id, kind }) {
-  const site = (env.DATA_BASE_URL || "https://indexagentica.com").replace(/\/+$/, "");
+  const site = siteOf(env);
   return kind === "zip" ? `${site}/skills/${id}.zip` : `${site}/skills/${id}/SKILL.md`;
 }
 
@@ -63,10 +65,10 @@ export async function handleSkillDownload(request, env, ctx, match, path, reply,
   }
   let d;
   try { d = await getData(env, ctx); } catch {
-    return reply(503, { error: { status: 503, code: "unavailable", message: "Could not load the site index; try the static file on indexagentica.com/skills/." } }, { "retry-after": "60" });
+    return reply(503, { error: { status: 503, code: "unavailable", message: `Could not load the site index; try the static file on ${siteOf(env)}/skills/.` } }, { "retry-after": "60" });
   }
   if (!d.longformByKey || !d.longformByKey.has(`skill:${match.id}`)) {
-    return reply(404, { error: { status: 404, code: "not_found", message: `No published skill "${match.id}". See https://indexagentica.com/skills/.` } });
+    return reply(404, { error: { status: 404, code: "not_found", message: `No published skill "${match.id}". See ${siteOf(env)}/skills/.` } });
   }
   const ua = request.headers.get("user-agent") || "";
   // Own counter; over the limit the redirect still works, the request just isn't recorded.

@@ -1,0 +1,87 @@
+# Self-hosting template for this Worker (see SELF_HOSTING.md).
+#   cp wrangler.example.toml wrangler.toml
+# Contains no account, domain or resource IDs. Replace every REPLACE_WITH_... value you keep.
+# wrangler.toml in the repo is the maintainers' own deployment; don't deploy it as is.
+
+name = "my-agent-directory-mcp"   # your Worker name -> https://<name>.<your-subdomain>.workers.dev
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+# account_id: not set. Wrangler uses the account you are logged in to (`npx wrangler login`)
+# or CLOUDFLARE_ACCOUNT_ID. Add `account_id = "..."` here if you have several accounts.
+
+workers_dev = true
+# Optional custom domain (needs a zone you control on Cloudflare):
+# routes = [ { pattern = "mcp.example.org", custom_domain = true } ]
+
+[vars]
+# Where the directory data is read from. Point this at your own mirror
+# (scripts/mirror-data.mjs; SELF_HOSTING.md "Data source"). indexagentica.com is only the default.
+DATA_BASE_URL = "https://indexagentica.com"
+CACHE_TTL_SECONDS = "600"
+# Documented limit; keep in sync with [ratelimits.simple] below.
+RATE_LIMIT_REQUESTS = "120"
+RATE_LIMIT_PERIOD_SECONDS = "60"
+ALLOWED_ORIGINS = "*"
+# Optional. Unset = links use the request origin (your workers.dev URL). Set it for a custom domain:
+# PUBLIC_BASE_URL = "https://mcp.example.org"
+# Not set on purpose: HIT_ORIGINS (POST /hit is the indexagentica.com page-view beacon; leave it unset
+# unless you run a site that sends beacons) and CF_ACCOUNT_ID (only for the optional /stats below).
+
+# ---------------------------------------------------------------------------
+# OPTIONAL: Workers Rate Limiting binding. Without it the Worker uses a per-isolate
+# token bucket with the same RATE_LIMIT_* numbers. namespace_id: any positive integer
+# unique within your account.
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+  [ratelimits.simple]
+  limit = 120
+  period = 60
+
+# ---------------------------------------------------------------------------
+# OPTIONAL: listing-request queue (request_listing tool, /v1/requests). Without this binding
+# those return 503 "unavailable" / a tool error; everything else works.
+#   npx wrangler d1 create my-agent-directory-requests     -> paste the database_id below
+#   npx wrangler d1 migrations apply my-agent-directory-requests --local    (wrangler dev)
+#   npx wrangler d1 migrations apply my-agent-directory-requests --remote   (deployed Worker)
+# Secrets: REQUESTS_ADMIN_TOKEN (>= 32 chars, admin routes) and REQUESTS_IP_SALT.
+[[d1_databases]]
+binding = "REQUESTS_DB"
+database_name = "my-agent-directory-requests"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+migrations_dir = "migrations"
+
+# ---------------------------------------------------------------------------
+# OPTIONAL: usage logging + public /stats. Without these: no logging (no-op), /stats answers
+# status "collecting", the cron rollup does nothing. Analytics Engine must be enabled for the
+# account in the dashboard first (deploys otherwise fail with code 10089).
+# [[analytics_engine_datasets]]
+# binding = "ANALYTICS"          # one data point per MCP/REST request
+# dataset = "my_agent_directory_mcp"
+# [[analytics_engine_datasets]]
+# binding = "HITS"               # site beacons + direct skill downloads
+# dataset = "my_agent_directory_hits"
+# [[kv_namespaces]]
+# binding = "STATS_KV"           # daily rollup for all-time /stats
+# id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"   # npx wrangler kv namespace create STATS_KV
+# [triggers]
+# crons = ["30 0 * * *"]
+# Then set CF_ACCOUNT_ID in [vars] and the CF_ANALYTICS_TOKEN secret (Account Analytics Read).
+
+[observability]
+enabled = true
+
+# Low-limit environment used only by the automated rate-limit test (npm test).
+[env.ratelimit-test]
+[env.ratelimit-test.vars]
+DATA_BASE_URL = "https://indexagentica.com"
+CACHE_TTL_SECONDS = "600"
+RATE_LIMIT_REQUESTS = "5"
+RATE_LIMIT_PERIOD_SECONDS = "10"
+ALLOWED_ORIGINS = "*"
+[[env.ratelimit-test.ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1002"
+  [env.ratelimit-test.ratelimits.simple]
+  limit = 5
+  period = 10

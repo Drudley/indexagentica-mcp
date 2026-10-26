@@ -227,6 +227,7 @@ async function handle(request, env, ctx, url, path, log) {
     if (path === "/v1/admin/tool-calls") {
       if (!isAdmin(request, env)) return errorJson(401, "unauthorized", "Admin token required.", {}, { "www-authenticate": "Bearer" });
       if (method !== "GET") return errorJson(405, "method_not_allowed", "GET only.", {}, { allow: "GET, OPTIONS" });
+      if (!env.CF_ANALYTICS_TOKEN || !env.CF_ACCOUNT_ID) return errorJson(503, "not_configured", "Analytics queries need CF_ACCOUNT_ID and the CF_ANALYTICS_TOKEN secret (optional; see SELF_HOSTING.md).");
       try {
         return json(200, await toolCallBreakdown(env, url.searchParams.get("hours") || 48), { "cache-control": "no-store" });
       } catch (err) {
