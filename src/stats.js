@@ -176,20 +176,46 @@ export function totalsFromRows({ api = [], legacy = [], hits = [], clients = [],
   return t;
 }
 
-export async function sql(env, query) {
-  const res = await fetch(SQL_URL(env.CF_ACCOUNT_ID), {
-    method: "POST",
-    headers: { authorization: `Bearer ${env.CF_ANALYTICS_TOKEN}`, "content-type": "text/plain" },
-    body: query,
-  });
-  const text = await res.text();
-  if (!res.ok) {
-    if (/unknown table|does not exist|not found/i.test(text) && query.includes(HITS_DS)) return []; // no beacon written yet
-    throw new StatsError(`Analytics Engine SQL API returned HTTP ${res.status}: ${text.slice(0, 200)}`);
+export const SQL_TIMEOUT_MS = 10000; // per query: a hung SQL API call must not hang /stats
+export const COMPUTE_BUDGET_MS = 25000; // whole recompute (waitUntil gets ~30 s after the response)
+
+/**
+ * One SQL API query. opts.signal aborts it (overall budget), opts.timeoutMs bounds it on its own,
+ * opts.timings (array) collects { label, ms, rows | error } for the stats_compute log line.
+ */
+export async function sql(env, query, opts = {}) {
+  const { signal, timeoutMs = SQL_TIMEOUT_MS, timings, label = "" } = opts;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(new StatsError(`Analytics Engine SQL API timed out after ${timeoutMs} ms`)), timeoutMs);
+  const onAbort = () => ctl.abort(signal.reason instanceof Error ? signal.reason : new StatsError("stats recompute budget exceeded"));
+  if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener("abort", onAbort, { once: true }); }
+  const t0 = Date.now();
+  const note = (extra) => { if (timings) timings.push({ label, ms: Date.now() - t0, ...extra }); };
+  try {
+    const res = await fetch(SQL_URL(env.CF_ACCOUNT_ID), {
+      method: "POST",
+      headers: { authorization: `Bearer ${env.CF_ANALYTICS_TOKEN}`, "content-type": "text/plain" },
+      body: query,
+      signal: ctl.signal,
+    });
+    const text = await res.text();
+    if (!res.ok) {
+      if (/unknown table|does not exist|not found/i.test(text) && query.includes(HITS_DS)) { note({ rows: 0 }); return []; } // no beacon written yet
+      throw new StatsError(`Analytics Engine SQL API returned HTTP ${res.status}: ${text.slice(0, 200)}`);
+    }
+    let j;
+    try { j = JSON.parse(text); } catch { throw new StatsError("Analytics Engine SQL API returned non-JSON"); }
+    const rows = Array.isArray(j.data) ? j.data : [];
+    note({ rows: rows.length });
+    return rows;
+  } catch (err) {
+    const e = ctl.signal.aborted && ctl.signal.reason instanceof Error ? ctl.signal.reason : err;
+    note({ error: String((e && e.message) || e).slice(0, 80) });
+    throw e instanceof StatsError ? e : new StatsError(`Analytics Engine SQL API request failed: ${(e && e.message) || e}`);
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", onAbort);
   }
-  let j;
-  try { j = JSON.parse(text); } catch { throw new StatsError("Analytics Engine SQL API returned non-JSON"); }
-  return Array.isArray(j.data) ? j.data : [];
 }
 
 /**
@@ -213,21 +239,22 @@ export async function toolCallBreakdown(env, hours = 48, now = Date.now()) {
 }
 
 /** Totals for one time condition (SQL WHERE fragment): outside traffic, plus what was excluded. */
-export async function queryTotals(env, cond, classify) {
+export async function queryTotals(env, cond, classify, opts = {}) {
   const out = `${cond} AND NOT ${API_INTERNAL}`;
   const hout = `${cond} AND NOT ${HITS_INTERNAL}`;
   const S = "SUM(_sample_interval) AS n";
+  const q = (label) => ({ ...opts, label: `${opts.label || "window"}:${label}` });
   const [api, hits, clients, uas, internalApi, internalHits] = await Promise.all([
-    sql(env, `SELECT blob1 AS route, blob3 AS method, blob4 AS tool, blob17 AS cls, ${S} FROM ${MCP_DS} WHERE ${out} GROUP BY route, method, tool, cls FORMAT JSON`),
-    sql(env, `SELECT blob1 AS event, blob5 AS kind, blob3 AS id, blob10 AS probe, ${S} FROM ${HITS_DS} WHERE ${hout} GROUP BY event, kind, id, probe FORMAT JSON`),
-    sql(env, `SELECT blob5 AS client, ${S} FROM ${MCP_DS} WHERE ${out} AND blob1 = 'mcp' AND blob5 != '' GROUP BY client ORDER BY n DESC LIMIT ${KEEP_PER_DAY} FORMAT JSON`),
-    sql(env, `SELECT blob7 AS ua, ${S} FROM ${MCP_DS} WHERE ${out} GROUP BY ua ORDER BY n DESC LIMIT 500 FORMAT JSON`),
-    sql(env, `SELECT blob1 AS route, blob19 AS rule, ${S} FROM ${MCP_DS} WHERE ${cond} AND ${API_INTERNAL} GROUP BY route, rule FORMAT JSON`),
-    sql(env, `SELECT blob1 AS event, blob9 AS rule, ${S} FROM ${HITS_DS} WHERE ${cond} AND ${HITS_INTERNAL} GROUP BY event, rule FORMAT JSON`),
+    sql(env, `SELECT blob1 AS route, blob3 AS method, blob4 AS tool, blob17 AS cls, ${S} FROM ${MCP_DS} WHERE ${out} GROUP BY route, method, tool, cls FORMAT JSON`, q("api")),
+    sql(env, `SELECT blob1 AS event, blob5 AS kind, blob3 AS id, blob10 AS probe, ${S} FROM ${HITS_DS} WHERE ${hout} GROUP BY event, kind, id, probe FORMAT JSON`, q("hits")),
+    sql(env, `SELECT blob5 AS client, ${S} FROM ${MCP_DS} WHERE ${out} AND blob1 = 'mcp' AND blob5 != '' GROUP BY client ORDER BY n DESC LIMIT ${KEEP_PER_DAY} FORMAT JSON`, q("clients")),
+    sql(env, `SELECT blob7 AS ua, ${S} FROM ${MCP_DS} WHERE ${out} GROUP BY ua ORDER BY n DESC LIMIT 500 FORMAT JSON`, q("uas")),
+    sql(env, `SELECT blob1 AS route, blob19 AS rule, ${S} FROM ${MCP_DS} WHERE ${cond} AND ${API_INTERNAL} GROUP BY route, rule FORMAT JSON`, q("internal_api")),
+    sql(env, `SELECT blob1 AS event, blob9 AS rule, ${S} FROM ${HITS_DS} WHERE ${cond} AND ${HITS_INTERNAL} GROUP BY event, rule FORMAT JSON`, q("internal_hits")),
   ]);
   // Rows written before the ua_class column existed: classify from the stored (truncated) User-Agent.
   const legacy = api.some((r) => r.cls !== "human" && r.cls !== "agent")
-    ? await sql(env, `SELECT blob1 AS route, blob7 AS ua, ${S} FROM ${MCP_DS} WHERE ${out} AND blob17 = '' GROUP BY route, ua FORMAT JSON`)
+    ? await sql(env, `SELECT blob1 AS route, blob7 AS ua, ${S} FROM ${MCP_DS} WHERE ${out} AND blob17 = '' GROUP BY route, ua FORMAT JSON`, q("legacy"))
     : [];
   return totalsFromRows({ api, legacy, hits, clients, uas, internalApi, internalHits }, classify);
 }
@@ -245,43 +272,54 @@ function readDay(raw) {
   try { const d = JSON.parse(raw); return d && d.v === ROLLUP_VERSION ? d : null; } catch { return null; }
 }
 
+/** Read the day:YYYY-MM-DD rollups in [fromMs, toMs) in parallel (one sequential KV get per day
+ * used to add ~2 x 26 round trips to every recompute, growing by two each day). */
+async function readDays(env, fromMs, toMs) {
+  const days = [];
+  for (let d = fromMs; d < toMs; d += DAY_MS) days.push(d);
+  const raw = await Promise.all(days.map((d) => env.STATS_KV.get(`day:${isoDay(d)}`)));
+  return days.map((d, i) => ({ d, day: readDay(raw[i]) }));
+}
+
 /**
  * Store per-day totals in KV for completed, settled UTC days that are missing or from an older
  * rollup version (so rule changes apply retroactively while the raw data is still retained).
  * @returns {Promise<{stored: string[], skipped_expired: string[]}>}
  */
-export async function rollup(env, classify, { now = Date.now(), maxDays = 5 } = {}) {
+export async function rollup(env, classify, { now = Date.now(), maxDays = 5, signal, timings } = {}) {
   const out = { stored: [], skipped_expired: [] };
   if (!env.STATS_KV || !env.CF_ANALYTICS_TOKEN) return out;
-  for (let d = dayStart(firstDay(env)); d + DAY_MS + SETTLE_MS <= now && out.stored.length < maxDays; d += DAY_MS) {
-    const key = `day:${isoDay(d)}`;
-    if (readDay(await env.STATS_KV.get(key))) continue;
+  let end = dayStart(firstDay(env));
+  while (end + DAY_MS + SETTLE_MS <= now) end += DAY_MS; // first day that is not settled yet
+  for (const { d, day } of await readDays(env, dayStart(firstDay(env)), end)) {
+    if (out.stored.length >= maxDays) break;
+    if (day) continue;
     if (now - d > RETENTION_DAYS * DAY_MS) { out.skipped_expired.push(isoDay(d)); continue; }
-    const totals = await queryTotals(env, rangeCond(d, d + DAY_MS), classify);
+    const totals = await queryTotals(env, rangeCond(d, d + DAY_MS), classify, { signal, timings, label: `day ${isoDay(d)}` });
     totals.mcp.clients = topMap(totals.mcp.clients, KEEP_PER_DAY);
     totals.user_agent_families = topMap(totals.user_agent_families, KEEP_PER_DAY);
-    await env.STATS_KV.put(key, JSON.stringify({ v: ROLLUP_VERSION, day: isoDay(d), computed_at: new Date(now).toISOString(), totals }));
+    await env.STATS_KV.put(`day:${isoDay(d)}`, JSON.stringify({ v: ROLLUP_VERSION, day: isoDay(d), computed_at: new Date(now).toISOString(), totals }));
     out.stored.push(isoDay(d));
   }
   return out;
 }
 
 /** All-time: stored days (contiguous from the first day) + live query from the first unstored day. */
-export async function allTime(env, classify, now = Date.now()) {
+export async function allTime(env, classify, now = Date.now(), opts = {}) {
   let total = emptyTotals();
   let d = dayStart(firstDay(env));
   let stored = 0, lastStored = null;
   if (env.STATS_KV) {
-    for (; d < dayStart(isoDay(now)); d += DAY_MS) {
-      const day = readDay(await env.STATS_KV.get(`day:${isoDay(d)}`));
-      if (!day) break;
-      total = addTotals(total, day.totals);
+    for (const r of await readDays(env, d, dayStart(isoDay(now)))) {
+      if (!r.day) break;
+      total = addTotals(total, r.day.totals);
       stored++;
-      lastStored = isoDay(d);
+      lastStored = isoDay(r.d);
+      d = r.d + DAY_MS;
     }
   }
   const complete = now - d <= RETENTION_DAYS * DAY_MS;
-  total = addTotals(total, await queryTotals(env, rangeCond(d), classify));
+  total = addTotals(total, await queryTotals(env, rangeCond(d), classify, { ...opts, label: "all_time" }));
   return { totals: total, rollup: { version: ROLLUP_VERSION, days_stored: stored, last_stored_day: lastStored, live_from: new Date(d).toISOString(), complete } };
 }
 
@@ -349,14 +387,15 @@ const INTERNAL_RULES = {
   retroactive: "Logged before 2026-10-12, when the flag did not exist yet: matched by the signature of our own sessions (MCP client name e2e, our test suite; or curl/node/python/headless-Chrome from the US during the documented launch and verification windows 2026-10-02 20:15-20:45 and 2026-10-03 04:55-05:50 UTC; site beacons from the US between 05:00 and 05:50 UTC on 2026-10-03).",
 };
 
-export async function computeStats(env, classify, base, now = Date.now()) {
+export async function computeStats(env, classify, base, now = Date.now(), opts = {}) {
   // Lazy catch-up if the cron missed a day. Each day is ~7 SQL subrequests; 3 windows use ~21 more,
   // so 2 days keeps one invocation under the Workers Free limit of 50 subrequests.
-  await rollup(env, classify, { now, maxDays: 2 });
+  const { signal, timings } = opts;
+  await rollup(env, classify, { now, maxDays: 2, signal, timings });
   const [h24, d7, all] = await Promise.all([
-    queryTotals(env, "timestamp > NOW() - INTERVAL '1' DAY", classify),
-    queryTotals(env, "timestamp > NOW() - INTERVAL '7' DAY", classify),
-    allTime(env, classify, now),
+    queryTotals(env, "timestamp > NOW() - INTERVAL '1' DAY", classify, { signal, timings, label: "last_24h" }),
+    queryTotals(env, "timestamp > NOW() - INTERVAL '7' DAY", classify, { signal, timings, label: "last_7d" }),
+    allTime(env, classify, now, { signal, timings }),
   ]);
   return {
     status: "ok",
@@ -382,46 +421,102 @@ export async function computeStats(env, classify, base, now = Date.now()) {
   };
 }
 
-// ---- GET /stats with in-memory + Cache API caching and request coalescing ----
-let memo = null; // { at, body, status }
+// ---- GET /stats: KV snapshot, stale-while-revalidate, single-flight refresh ----
+// The full response body is precomputed (cron every 5 min, src/index.js) and stored in STATS_KV.
+// Requests always get the last snapshot immediately; when it is older than CACHE_SECONDS a refresh
+// runs in ctx.waitUntil, guarded by a per-isolate in-flight promise plus a short KV lock (best
+// effort across isolates/colos). Only the very first request ever (no snapshot) waits for a
+// recompute. If upstream fails, the last snapshot keeps being served instead of a 503.
+export const SNAPSHOT_KEY = `stats:snapshot:v${ROLLUP_VERSION}`;
+const LOCK_KEY = `stats:lock:v${ROLLUP_VERSION}`;
+const LOCK_SECONDS = 60; // KV's minimum expirationTtl; longer than COMPUTE_BUDGET_MS
+const MEMO_MS = 30000; // in-isolate copy of the snapshot, saves a KV read per request
+
+let memo = null; // { at, snap: { at, body } }
 let inflight = null;
 
 export function _resetStatsCache() { memo = null; inflight = null; }
+
+async function readSnapshot(env) {
+  if (!env.STATS_KV) return null;
+  try {
+    const raw = await env.STATS_KV.get(SNAPSHOT_KEY, { cacheTtl: 30 });
+    const s = raw ? JSON.parse(raw) : null;
+    return s && s.body && s.body.status === "ok" && Number.isFinite(s.at) ? s : null;
+  } catch { return null; }
+}
+
+/**
+ * Recompute the snapshot once (single-flight per isolate; KV lock across isolates unless force).
+ * Resolves to the new snapshot, or null when another isolate holds the lock. Throws on upstream failure.
+ */
+export function refreshSnapshot(env, classify, base, { force = false, now } = {}) {
+  if (inflight) return inflight;
+  inflight = (async () => {
+    if (env.STATS_KV && !force) {
+      const held = await env.STATS_KV.get(LOCK_KEY).catch(() => null);
+      if (held && Date.now() - Number(held) < LOCK_SECONDS * 1000) return null;
+      await env.STATS_KV.put(LOCK_KEY, String(Date.now()), { expirationTtl: LOCK_SECONDS }).catch(() => {});
+    }
+    const timings = [];
+    const ctl = new AbortController();
+    const budget = setTimeout(() => ctl.abort(new StatsError(`stats recompute exceeded ${COMPUTE_BUDGET_MS} ms`)), COMPUTE_BUDGET_MS);
+    const t0 = Date.now();
+    try {
+      const at = now ?? Date.now();
+      const body = await computeStats(env, classify, base, at, { signal: ctl.signal, timings });
+      const snap = { at, body };
+      if (env.STATS_KV) await env.STATS_KV.put(SNAPSHOT_KEY, JSON.stringify(snap));
+      memo = { at: Date.now(), snap };
+      logCompute("ok", t0, timings);
+      return snap;
+    } catch (err) {
+      logCompute("error", t0, timings, err);
+      throw err;
+    } finally {
+      clearTimeout(budget);
+    }
+  })().finally(() => { inflight = null; });
+  return inflight;
+}
+
+function logCompute(outcome, t0, timings, err) {
+  const slow = [...timings].sort((a, b) => b.ms - a.ms).slice(0, 5);
+  console.log(JSON.stringify({ event: "stats_compute", outcome, ms: Date.now() - t0, queries: timings.length, max_query_ms: slow.length ? slow[0].ms : 0, slowest: slow, errors: timings.filter((t) => t.error).length, ...(err ? { error: String(err.message || err).slice(0, 160) } : {}) }));
+}
+
+// The snapshot is shared by every host name (custom domain, workers.dev); only stats_url depends on it.
+const rebase = (body, base) => (body.stats_url === `${base}/stats` ? body : { ...body, stats_url: `${base}/stats` });
+
+function unavailable(env, err) {
+  return { status: 503, ttl: 60, body: { status: "unavailable", message: `Usage stats are temporarily unavailable: ${err && err.message ? err.message : err}`, since: sinceOf(env), generated: new Date().toISOString() } };
+}
 
 export async function statsResponse(request, env, ctx, base, classify) {
   const now = Date.now();
   if (!env.CF_ANALYTICS_TOKEN || !env.CF_ACCOUNT_ID) {
     return { status: 200, ttl: 60, body: collectingBody(env, base, "Usage is being logged, but aggregate numbers are not published yet: the stats query token (CF_ANALYTICS_TOKEN) is not configured on the server.") };
   }
-  if (memo && now - memo.at < memo.ttl * 1000) return memo;
-  let cache = null;
-  const key = new Request(`${base}/stats?__v=${ROLLUP_VERSION}.dl`, { method: "GET" });
-  try { cache = typeof caches !== "undefined" ? caches.default : null; } catch { cache = null; }
-  if (cache) {
+  let snap = memo && now - memo.at < MEMO_MS ? memo.snap : null;
+  if (!snap) {
+    const kv = await readSnapshot(env);
+    snap = kv && (!memo || kv.at >= memo.snap.at) ? kv : memo ? memo.snap : null;
+    if (snap) memo = { at: now, snap };
+  }
+  if (!snap) {
+    // Nothing stored yet (first deploy / KV not bound): compute in the request, bounded by the budget.
     try {
-      const hit = await cache.match(key);
-      if (hit) {
-        memo = { at: now, ttl: 60, status: 200, body: await hit.json() }; // short local memo; the edge copy holds the 10 min
-        return memo;
-      }
-    } catch { /* workers.dev has no Cache API; fall through */ }
+      const s = await refreshSnapshot(env, classify, base, { force: true, now });
+      return { status: 200, ttl: CACHE_SECONDS, body: rebase(s.body, base) };
+    } catch (err) {
+      return unavailable(env, err);
+    }
   }
-  if (!inflight) {
-    inflight = computeStats(env, classify, base, now)
-      .then((body) => {
-        memo = { at: Date.now(), ttl: CACHE_SECONDS, status: 200, body };
-        if (cache) {
-          const put = cache.put(key, new Response(JSON.stringify(body), { headers: { "content-type": "application/json", "cache-control": `public, max-age=${CACHE_SECONDS}` } })).catch(() => {});
-          if (ctx && ctx.waitUntil) ctx.waitUntil(put);
-        }
-        return memo;
-      })
-      .catch((err) => {
-        const r = { at: Date.now(), ttl: 60, status: 503, body: { status: "unavailable", message: `Usage stats are temporarily unavailable: ${err && err.message ? err.message : err}`, since: sinceOf(env), generated: new Date().toISOString() } };
-        memo = r;
-        return r;
-      })
-      .finally(() => { inflight = null; });
+  const age = now - snap.at;
+  if (age >= CACHE_SECONDS * 1000) {
+    const p = refreshSnapshot(env, classify, base).catch(() => null); // logged in refreshSnapshot; stale copy stays
+    if (ctx && ctx.waitUntil) ctx.waitUntil(p);
   }
-  return inflight;
+  // Browsers/CDNs keep it only for the snapshot's remaining freshness (at least 60 s).
+  return { status: 200, ttl: Math.max(60, CACHE_SECONDS - Math.floor(age / 1000)), body: rebase(snap.body, base) };
 }

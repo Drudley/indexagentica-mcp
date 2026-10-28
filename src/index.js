@@ -7,7 +7,7 @@ import { getData } from "./data.js";
 import { openapi } from "./openapi.js";
 import { newLog, noteArgs, writeLog } from "./analytics.js";
 import { handleHit } from "./hits.js";
-import { statsResponse, rollup, CACHE_SECONDS, toolCallBreakdown, StatsError } from "./stats.js";
+import { statsResponse, rollup, refreshSnapshot, CACHE_SECONDS, toolCallBreakdown, StatsError } from "./stats.js";
 import { uaClass } from "./ua.js";
 import { internalRule } from "./internal.js";
 import { matchSkillPath, handleSkillDownload } from "./downloads.js";
@@ -43,6 +43,10 @@ function errorJson(status, code, message, extra = {}, headers = {}) {
 function safeDecode(v) {
   try { return decodeURIComponent(v); } catch { return "invalid"; }
 }
+
+// Cron runs have no request; stats_url is re-based per request when the snapshot is served.
+const SNAPSHOT_CRON = "*/5 * * * *";
+const cronBase = (env) => env.PUBLIC_BASE_URL || "https://mcp.indexagentica.com";
 
 function baseUrl(request, env) {
   return env.PUBLIC_BASE_URL || new URL(request.url).origin;
@@ -151,8 +155,15 @@ export default {
     return res;
   },
 
-  // Daily cron ([triggers] in wrangler.toml): store yesterday's totals in KV for the all-time figure.
+  // Crons ([triggers] in wrangler.toml):
+  //   "30 0 * * *"  store yesterday's totals in KV for the all-time figure;
+  //   "*/5 * * * *"  precompute the /stats snapshot so requests never wait for the SQL API.
   async scheduled(event, env, ctx) {
+    if (event && event.cron === SNAPSHOT_CRON) {
+      if (!env.CF_ANALYTICS_TOKEN || !env.CF_ACCOUNT_ID || !env.STATS_KV) return;
+      ctx.waitUntil(refreshSnapshot(env, uaClass, cronBase(env), { force: true }).catch((err) => console.error("stats snapshot failed", err && err.message)));
+      return;
+    }
     // At most 5 days per run: each day is 7 SQL subrequests (Workers Free allows 50 per invocation).
     ctx.waitUntil(rollup(env, uaClass, { maxDays: 5 }).catch((err) => console.error("stats rollup failed", err && err.message)));
   },
@@ -194,7 +205,7 @@ async function handle(request, env, ctx, url, path, log) {
       const srl = await checkRateLimit(request, env, "stats");
       if (!srl.success) return errorJson(429, "rate_limited", "Too many requests.", { retry_after: srl.retryAfter }, { "retry-after": String(srl.retryAfter) });
       const r = await statsResponse(request, env, ctx, baseUrl(request, env), uaClass);
-      const maxAge = r.status === 200 && r.body.status === "ok" ? CACHE_SECONDS : 60;
+      const maxAge = r.status === 200 && r.body.status === "ok" ? (r.ttl || CACHE_SECONDS) : 60;
       return json(r.status, r.body, { "cache-control": `public, max-age=${maxAge}` });
     }
 

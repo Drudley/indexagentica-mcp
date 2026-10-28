@@ -208,9 +208,15 @@ Engine keeps 3 months, a daily cron (`30 0 * * *`) stores each completed UTC day
 stored (`/stats` also catches up missing days lazily). `since.mcp_api` (`STATS_API_SINCE`, first deploy
 with request logging) and `since.site_beacon` (`STATS_BEACON_SINCE`, deploy of the beacon) label where
 counting starts; nothing earlier is estimated or backfilled. Only the server's own tool names are
-published (anything else is `unknown_tool`). Responses are cached 10 minutes (Cache API + in-memory,
-`Cache-Control: public, max-age=600`). Without the token the endpoint answers
-`{"status":"collecting", ...}` with no numbers; if the SQL API fails, `503 {"status":"unavailable"}`.
+published (anything else is `unknown_tool`). The response body is precomputed: a cron every 5 minutes
+(`*/5 * * * *`) stores a snapshot in `STATS_KV` (`stats:snapshot:v3`; `generated` is when it was
+computed), and requests always get the last snapshot immediately (stale-while-revalidate: once it is
+older than 10 minutes, one refresh runs in the background, single-flight per isolate plus a short KV
+lock). Each SQL query has a 10 s timeout, a whole recompute a 25 s budget, queries run in parallel.
+If the SQL API fails, the last snapshot keeps being served; `503 {"status":"unavailable"}` only when
+no snapshot exists yet. `Cache-Control: public, max-age=` the snapshot's remaining freshness
+(600 s at most, 60 s at least). Each recompute logs one `stats_compute` line (total and slowest query
+times). Without the token the endpoint answers `{"status":"collecting", ...}` with no numbers.
 
 Every window counts **outside traffic only** and adds: `site.downloads.by_skill`,
 `site.direct_downloads` (total, zip, skill_md, by_skill, crawlers_and_probes), `site.skill_downloads`
@@ -324,7 +330,7 @@ Other clients use their own name for Streamable HTTP (Cline: `"type": "streamabl
 | `HIT_ORIGINS` | `https://indexagentica.com,https://www.indexagentica.com` | Origins allowed to `POST /hit` |
 
 Secret: `CF_ANALYTICS_TOKEN` (Account Analytics Read), set with `wrangler secret put CF_ANALYTICS_TOKEN`.
-Bindings: `ANALYTICS` and `HITS` (Analytics Engine), `STATS_KV` (KV), `RATE_LIMITER`; cron `30 0 * * *`.
+Bindings: `ANALYTICS` and `HITS` (Analytics Engine), `STATS_KV` (KV), `RATE_LIMITER`; crons `30 0 * * *` (daily rollup) and `*/5 * * * *` (/stats snapshot).
 
 ## Deploy
 
@@ -374,7 +380,7 @@ src/analytics.js  per-request usage logging to Workers Analytics Engine (no-op w
 src/ua.js         human (browser) vs agent User-Agent classification
 src/hits.js       POST /hit: site beacon validation + logging (dataset indexagentica_hits)
 src/downloads.js  GET/HEAD /skills/<id>.zip|SKILL.md: direct download count + 302 to the site
-src/stats.js      GET /stats: Analytics Engine SQL aggregation, KV daily rollup (cron), caching
+src/stats.js      GET /stats: Analytics Engine SQL aggregation, KV daily rollup + snapshot (crons), stale-while-revalidate
 src/internal.js   internal-traffic rules (header, UA, optional IP ranges)
 src/requests.js   listing requests: validation, dedupe, votes, rate limits, D1 queue, admin
 migrations/       D1 schema for indexagentica-requests

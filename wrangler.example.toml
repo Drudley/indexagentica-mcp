@@ -65,7 +65,7 @@ migrations_dir = "migrations"
 # binding = "STATS_KV"           # daily rollup for all-time /stats
 # id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"   # npx wrangler kv namespace create STATS_KV
 # [triggers]
-# crons = ["30 0 * * *"]
+# crons = ["30 0 * * *", "*/5 * * * *"]   # daily rollup; /stats snapshot every 5 min
 # Then set CF_ACCOUNT_ID in [vars] and the CF_ANALYTICS_TOKEN secret (Account Analytics Read).
 
 [observability]

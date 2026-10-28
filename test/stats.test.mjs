@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { uaClass } from "../src/ua.js";
 import { validateHit, knownPaths, entryHosts, hitDataPoint, HIT_BLOBS } from "../src/hits.js";
-import { totalsFromRows, addTotals, emptyTotals, rollup, allTime, _resetStatsCache, queryTotals, API_INTERNAL, API_RETRO, HITS_INTERNAL, uaFamily, cleanName } from "../src/stats.js";
+import { totalsFromRows, addTotals, emptyTotals, rollup, allTime, _resetStatsCache, queryTotals, API_INTERNAL, API_RETRO, HITS_INTERNAL, uaFamily, cleanName, sql, SNAPSHOT_KEY, CACHE_SECONDS } from "../src/stats.js";
 import { internalRule } from "../src/internal.js";
 import { prepare } from "../src/data.js";
 import { dataPoint, newLog, BLOBS } from "../src/analytics.js";
@@ -355,4 +355,113 @@ test("GET/HEAD /skills/<id>.zip|SKILL.md: record in HITS then 302 to the site; u
   }
   assert.equal((await req("/skills/web-lookup.zip", { method: "POST" })).status, 405);
   assert.equal(pts.length, 5, "rejected requests store nothing");
+});
+
+// ---- /stats snapshot: stale-while-revalidate, single flight, stale on error, timeouts ----
+const keysDeep = (o, p = "") => (o && typeof o === "object" && !Array.isArray(o) ? Object.keys(o).flatMap((k) => [p + k, ...keysDeep(o[k], p + k + ".")]) : []);
+const statsEnv = (kv = fakeKV()) => ({ ...BASE_ENV, CF_ACCOUNT_ID: "acct", CF_ANALYTICS_TOKEN: "tok", STATS_KV: kv, STATS_API_SINCE: new Date(Date.now() - 7200e3).toISOString(), STATS_BEACON_SINCE: new Date(Date.now() - 3600e3).toISOString() });
+const pending = () => { const ps = []; return { ps, ctx: { waitUntil: (p) => ps.push(p) }, settle: () => Promise.all(ps) }; };
+const getStats = (env, ctx, host = "https://mcp.test") => worker.fetch(new Request(`${host}/stats`), env, ctx);
+
+test("/stats: stale snapshot served immediately, one background refresh, same JSON shape", async () => {
+  _resetStatsCache();
+  sqlRows = byShape({ hits: [{ event: "pageview", kind: "", n: "3" }], api: [{ route: "rest", method: "", tool: "search", cls: "human", n: "2" }] });
+  const env = statsEnv();
+  const w = pending();
+  const first = await (await getStats(env, w.ctx)).json(); // no snapshot yet: computed in the request
+  assert.equal(first.status, "ok");
+  const snap = JSON.parse(env.STATS_KV.m.get(SNAPSHOT_KEY));
+  assert.equal(snap.body.generated, first.generated, "snapshot stored");
+  // Age the snapshot past CACHE_SECONDS; new data upstream.
+  snap.at -= (CACHE_SECONDS + 5) * 1000;
+  env.STATS_KV.m.set(SNAPSHOT_KEY, JSON.stringify(snap));
+  _resetStatsCache();
+  sqlRows = byShape({ hits: [{ event: "pageview", kind: "", n: "8" }], api: [{ route: "rest", method: "", tool: "search", cls: "human", n: "2" }] });
+  sqlCalls.length = 0;
+  const w2 = pending();
+  const [r1, r2, r3] = await Promise.all([getStats(env, w2.ctx), getStats(env, w2.ctx), getStats(env, w2.ctx)]);
+  for (const r of [r1, r2, r3]) {
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).windows.last_24h.site.page_views, 3, "stale copy, no waiting");
+    assert.match(r.headers.get("cache-control"), /max-age=60\b/, "stale copy cached briefly");
+  }
+  await w2.settle();
+  assert.equal(sqlCalls.length, 18, "exactly one refresh (3 windows x 6 queries) for 3 concurrent stale requests");
+  const fresh = await (await getStats(env, {})).json();
+  assert.equal(fresh.windows.last_24h.site.page_views, 8, "refreshed snapshot served next");
+  assert.deepEqual(keysDeep(fresh), keysDeep(first), "identical key set");
+  // stats_url follows the host that served it; the snapshot is shared.
+  const wd = await (await getStats({ ...env }, {}, "https://indexagentica-mcp.x.workers.dev")).json();
+  assert.equal(wd.stats_url, "https://indexagentica-mcp.x.workers.dev/stats");
+});
+
+test("/stats: upstream failure keeps serving the last snapshot (no 503); KV lock blocks a second refresher", async () => {
+  _resetStatsCache();
+  sqlRows = byShape({ hits: [{ event: "pageview", kind: "", n: "5" }] });
+  const env = statsEnv();
+  await getStats(env, {});
+  const snap = JSON.parse(env.STATS_KV.m.get(SNAPSHOT_KEY));
+  snap.at -= (CACHE_SECONDS + 5) * 1000;
+  env.STATS_KV.m.set(SNAPSHOT_KEY, JSON.stringify(snap));
+  _resetStatsCache();
+  const prev = globalThis.fetch;
+  globalThis.fetch = async (url, init) => (String(url).includes("analytics_engine") ? new Response("upstream down", { status: 503 }) : prev(url, init));
+  try {
+    const w = pending();
+    const r = await getStats(env, w.ctx);
+    assert.equal(r.status, 200);
+    assert.equal((await r.json()).windows.last_24h.site.page_views, 5);
+    await w.settle(); // refresh fails quietly
+    assert.equal(JSON.parse(env.STATS_KV.m.get(SNAPSHOT_KEY)).at, snap.at, "failed refresh does not overwrite the snapshot");
+    _resetStatsCache();
+    const r2 = await getStats(env, {});
+    assert.equal(r2.status, 200, "still the stale copy, not 503");
+  } finally { globalThis.fetch = prev; }
+  // Another isolate holds the lock: no SQL from this one.
+  _resetStatsCache();
+  env.STATS_KV.m.set("stats:lock:v3", String(Date.now()));
+  sqlCalls.length = 0;
+  const w = pending();
+  assert.equal((await getStats(env, w.ctx)).status, 200);
+  await w.settle();
+  assert.equal(sqlCalls.length, 0, "locked: no duplicate recompute");
+});
+
+test("sql(): a hung SQL API call is aborted by the per-query timeout and the overall budget", async () => {
+  const prev = globalThis.fetch;
+  globalThis.fetch = (url, init) => new Promise((_, rej) => init.signal.addEventListener("abort", () => rej(init.signal.reason)));
+  const env = { CF_ACCOUNT_ID: "a", CF_ANALYTICS_TOKEN: "t" };
+  try {
+    const timings = [];
+    const t0 = Date.now();
+    await assert.rejects(sql(env, "SELECT 1", { timeoutMs: 50, timings, label: "x" }), /timed out after 50 ms/);
+    assert.ok(Date.now() - t0 < 1000);
+    assert.equal(timings[0].label, "x");
+    assert.match(timings[0].error, /timed out/);
+    const ctl = new AbortController();
+    const p = sql(env, "SELECT 1", { signal: ctl.signal, timeoutMs: 60000 });
+    ctl.abort(new Error("budget"));
+    await assert.rejects(p, /budget/);
+  } finally { globalThis.fetch = prev; }
+});
+
+test("cron: */5 precomputes the snapshot, 00:30 runs the daily rollup", async () => {
+  _resetStatsCache();
+  sqlRows = byShape({ hits: [{ event: "pageview", kind: "", n: "2" }] });
+  const env = statsEnv();
+  const w = pending();
+  await worker.scheduled({ cron: "*/5 * * * *" }, env, w.ctx);
+  await w.settle();
+  const snap = JSON.parse(env.STATS_KV.m.get(SNAPSHOT_KEY));
+  assert.equal(snap.body.status, "ok");
+  assert.equal(snap.body.stats_url, "https://mcp.indexagentica.com/stats");
+  const w2 = pending();
+  await worker.scheduled({ cron: "30 0 * * *" }, { ...env, STATS_API_SINCE: "2026-10-02T20:21:47Z" }, w2.ctx);
+  await w2.settle();
+  assert.ok([...env.STATS_KV.m.keys()].some((k) => k.startsWith("day:")), "rollup stored days");
+  // Served without any SQL.
+  _resetStatsCache();
+  sqlCalls.length = 0;
+  assert.equal((await getStats(env, {})).status, 200);
+  assert.equal(sqlCalls.length, 0);
 });
