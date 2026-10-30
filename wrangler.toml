@@ -61,7 +61,7 @@ binding = "STATS_KV"
 id = "26ddeb51a2204ced97e8db481fd2030e"
 
 # Daily at 00:30 UTC: store the previous UTC day's totals in STATS_KV.
-# Every 5 min: precompute the /stats snapshot (STATS_KV stats:snapshot:v3; 1 KV write per run,
+# Every 5 min: precompute the /stats snapshot (STATS_KV stats:snapshot:v<ROLLUP_VERSION>; 1 KV write per run,
 # ~290/day of the 1000/day Workers Free KV write budget).
 [triggers]
 crons = ["30 0 * * *", "*/5 * * * *"]

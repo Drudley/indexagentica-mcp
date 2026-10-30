@@ -19,7 +19,7 @@ export const CACHE_SECONDS = 600;
 export const DEFAULT_API_SINCE = "2026-10-02T20:21:47Z"; // first deploy with request logging on
 const MCP_DS = "indexagentica_mcp";
 const HITS_DS = "indexagentica_hits";
-const ROLLUP_VERSION = 3; // v2: internal traffic excluded, breakdowns added; v3: retro rule without the colo gate (older days are recomputed)
+const ROLLUP_VERSION = 4; // v2: internal traffic excluded, breakdowns added; v3: retro rule without the colo gate; v4: own tooling by UA/client name + the 2026-10-24 session (older days are recomputed)
 // Canonical tool names + unadvertised aliases come from src/tools.js so the stats can't drift
 // from the server (request_listing was missing here, so its calls were bucketed as unknown_tool).
 import { canonicalToolName } from "./tools.js";
@@ -58,7 +58,17 @@ export const RETRO_WINDOWS = [
 const inWindows = RETRO_WINDOWS.map(([a, b]) => `(timestamp >= toDateTime('${a}') AND timestamp < toDateTime('${b}'))`).join(" OR ");
 const BOX_UA = "(blob7 LIKE 'curl/%' OR blob7 = 'node' OR blob7 LIKE 'python%' OR blob7 LIKE '%HeadlessChrome%' OR blob7 LIKE 'indexagentica%')";
 export const API_RETRO = `(blob18 = '' AND (blob5 = 'e2e' OR (blob12 = 'US' AND ${BOX_UA} AND (${inWindows}))))`;
-export const API_INTERNAL = `(blob18 = 'internal' OR ${API_RETRO})`;
+// Our own tooling by its self-identification, whatever the stored flag says (rows from before the
+// flag existed, or a client that only identified itself in clientInfo): the site link checker
+// (UA token IndexAgenticaLinkCheck, GitHub Actions; it ran unflagged 2026-10-03..11), the site build
+// (UA indexagentica-build...) and MCP clients named indexagentica-*. Exact patterns only: a broad
+// '%indexagentica%' would also match third-party bots that put our host name in their UA.
+export const API_SELF = "(blob7 LIKE '%IndexAgenticaLinkCheck%' OR blob7 LIKE 'indexagentica-build%' OR blob5 LIKE 'indexagentica-%')";
+// One documented session that was logged as outside traffic: the Author's wrong-tool-name tests on
+// 2026-10-24 05:10-05:15 UTC from our shared box (curl/8.14.1, and the guide's example client
+// ia-example, Sweden, Cloudflare WARP AS13335). Every SE / AS13335 row in that window was ours.
+export const API_SESSIONS = "(timestamp >= toDateTime('2026-10-24 05:10:00') AND timestamp < toDateTime('2026-10-24 05:15:00') AND blob12 = 'SE' AND double3 = 13335 AND (blob7 = 'curl/8.14.1' OR blob5 = 'ia-example'))";
+export const API_INTERNAL = `(blob18 = 'internal' OR ${API_RETRO} OR ${API_SELF} OR ${API_SESSIONS})`;
 // Site beacons before the flag: our own curl + headless-browser checks during the beacon launch session.
 export const HITS_RETRO = "(blob8 = '' AND blob7 = 'US' AND timestamp >= toDateTime('2026-10-03 05:00:00') AND timestamp < toDateTime('2026-10-03 05:50:00'))";
 export const HITS_INTERNAL = `(blob8 = 'internal' OR ${HITS_RETRO})`;
@@ -164,7 +174,7 @@ export function totalsFromRows({ api = [], legacy = [], hits = [], clients = [],
   for (const r of internalApi) {
     const c = n(r.n);
     if (r.route === "mcp") ex.mcp_requests += c; else if (r.route === "rest") ex.api_requests += c; else continue;
-    bump(ex.by_rule, ["header", "ua", "ip"].includes(r.rule) ? r.rule : "retroactive", c);
+    bump(ex.by_rule, r.rule === "client" ? "ua" : ["header", "ua", "ip"].includes(r.rule) ? r.rule : "retroactive", c);
   }
   for (const r of internalHits) {
     const c = n(r.n);
@@ -395,9 +405,9 @@ const DEFINITIONS = {
 
 const INTERNAL_RULES = {
   header: "Request carries the header X-Indexagentica-Internal: 1 (our tests, monitors and agents send it).",
-  ua: "User-Agent contains \"indexagentica\" (our own clients identify themselves, e.g. indexagentica-e2e/1).",
+  ua: "User-Agent contains \"indexagentica\" (our own clients identify themselves, e.g. indexagentica-e2e/1), or the MCP client name (clientInfo) starts with \"indexagentica-\".",
   ip: "Client IP inside a configured internal range (INTERNAL_IPS secret; unset unless our egress is stable).",
-  retroactive: "Logged before 2026-10-12, when the flag did not exist yet: matched by the signature of our own sessions (MCP client name e2e, our test suite; or curl/node/python/headless-Chrome from the US during the documented launch and verification windows 2026-10-02 20:15-20:45 and 2026-10-03 04:55-05:50 UTC; site beacons from the US between 05:00 and 05:50 UTC on 2026-10-03).",
+  retroactive: "Logged before 2026-10-12, when the flag did not exist yet: matched by the signature of our own sessions (MCP client name e2e, our test suite; or curl/node/python/headless-Chrome from the US during the documented launch and verification windows 2026-10-02 20:15-20:45 and 2026-10-03 04:55-05:50 UTC; site beacons from the US between 05:00 and 05:50 UTC on 2026-10-03); plus, for any date, our site link checker (User-Agent token IndexAgenticaLinkCheck), site build (indexagentica-build) and MCP clients named indexagentica-*, and one test session on 2026-10-24 05:10-05:15 UTC (curl/8.14.1 and the example client ia-example from our shared box).",
 };
 
 export async function computeStats(env, classify, base, now = Date.now(), opts = {}) {
@@ -450,13 +460,23 @@ let inflight = null;
 
 export function _resetStatsCache() { memo = null; inflight = null; }
 
+const PREV_SNAPSHOT_KEY = `stats:snapshot:v${ROLLUP_VERSION - 1}`;
+
 async function readSnapshot(env) {
   if (!env.STATS_KV) return null;
-  try {
-    const raw = await env.STATS_KV.get(SNAPSHOT_KEY, { cacheTtl: 30 });
-    const s = raw ? JSON.parse(raw) : null;
-    return s && s.body && s.body.status === "ok" && Number.isFinite(s.at) ? s : null;
-  } catch { return null; }
+  const read = async (key) => {
+    try {
+      const raw = await env.STATS_KV.get(key, { cacheTtl: 30 });
+      const s = raw ? JSON.parse(raw) : null;
+      return s && s.body && s.body.status === "ok" && Number.isFinite(s.at) ? s : null;
+    } catch { return null; }
+  };
+  const cur = await read(SNAPSHOT_KEY);
+  if (cur) return cur;
+  // Right after a ROLLUP_VERSION bump: serve the previous version's body as stale (age forces a
+  // background refresh) instead of making a request wait for, or fail on, the first new compute.
+  const prev = await read(PREV_SNAPSHOT_KEY);
+  return prev ? { at: 0, body: prev.body, prev: true } : null;
 }
 
 /**

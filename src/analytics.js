@@ -80,8 +80,12 @@ export function outcomeOf(status, log) {
 }
 
 /** Build the Analytics Engine data point (exported for tests). */
+// MCP clients that name themselves indexagentica-* (clientInfo) are ours even without the header/UA.
+const OWN_CLIENT_RE = /^indexagentica-/i;
+
 export function dataPoint(log, status, cf = {}) {
   const outcome = outcomeOf(status, log);
+  if (!log.rule && OWN_CLIENT_RE.test(log.clientName || "")) log.rule = "client";
   const blobs = [
     log.route, log.endpoint, cut(log.method, 40), cut(log.tool, 40), cut(log.clientName, 64), cut(log.clientVersion, 32),
     cut(log.ua, 128), cut(log.protocol, 16), log.era, outcome, cut(log.detail, 40), cut(cf.country, 4), cut(cf.colo, 8),

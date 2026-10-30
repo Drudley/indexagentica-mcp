@@ -4,6 +4,8 @@
 //
 //   header  X-Indexagentica-Internal: 1  (our E2E suite and agents send it)
 //   ua      User-Agent containing "indexagentica" (e.g. indexagentica-e2e/1, indexagentica-steward/1)
+//   client  MCP clientInfo name starting "indexagentica-" (set when the data point is built,
+//           src/analytics.js; counted under "ua" in internal_excluded.by_rule)
 //   ip      client IP inside INTERNAL_IPS (secret; comma-separated IPs/CIDRs, v4 or v6). Matched in
 //           memory only; IPs are never stored. Unset by default: the shared box egresses through
 //           rotating relay addresses that real users share, so an IP rule would misclassify them.

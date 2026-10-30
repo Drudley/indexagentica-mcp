@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { uaClass } from "../src/ua.js";
 import { validateHit, knownPaths, entryHosts, hitDataPoint, HIT_BLOBS } from "../src/hits.js";
-import { totalsFromRows, addTotals, emptyTotals, rollup, allTime, _resetStatsCache, queryTotals, API_INTERNAL, API_RETRO, HITS_INTERNAL, uaFamily, cleanName, sql, SNAPSHOT_KEY, CACHE_SECONDS } from "../src/stats.js";
+import { totalsFromRows, addTotals, emptyTotals, rollup, allTime, _resetStatsCache, queryTotals, API_INTERNAL, API_RETRO, HITS_INTERNAL, uaFamily, cleanName, sql, SNAPSHOT_KEY, CACHE_SECONDS, API_SELF, API_SESSIONS } from "../src/stats.js";
 import { internalRule } from "../src/internal.js";
 import { prepare } from "../src/data.js";
 import { dataPoint, newLog, BLOBS } from "../src/analytics.js";
@@ -279,7 +279,7 @@ test("rollup days from an older version are recomputed", async () => {
   const env = { ...BASE_ENV, CF_ACCOUNT_ID: "acct", CF_ANALYTICS_TOKEN: "tok", STATS_KV: kv, STATS_API_SINCE: "2026-10-03T05:00:00Z", STATS_BEACON_SINCE: "2026-10-03T05:00:00Z" };
   const r = await rollup(env, uaClass, { now: Date.parse("2026-10-04T12:00:00Z") });
   assert.deepEqual(r.stored, ["2026-10-03"]);
-  assert.equal(JSON.parse(kv.m.get("day:2026-10-03")).v, 3);
+  assert.equal(JSON.parse(kv.m.get("day:2026-10-03")).v, 4);
   assert.equal(JSON.parse(kv.m.get("day:2026-10-03")).totals.mcp.requests, 1);
 });
 
@@ -419,7 +419,7 @@ test("/stats: upstream failure keeps serving the last snapshot (no 503); KV lock
   } finally { globalThis.fetch = prev; }
   // Another isolate holds the lock: no SQL from this one.
   _resetStatsCache();
-  env.STATS_KV.m.set("stats:lock:v3", String(Date.now()));
+  env.STATS_KV.m.set(SNAPSHOT_KEY.replace("snapshot", "lock"), String(Date.now()));
   sqlCalls.length = 0;
   const w = pending();
   assert.equal((await getStats(env, w.ctx)).status, 200);
@@ -464,4 +464,57 @@ test("cron: */5 precomputes the snapshot, 00:30 runs the daily rollup", async ()
   sqlCalls.length = 0;
   assert.equal((await getStats(env, {})).status, 200);
   assert.equal(sqlCalls.length, 0);
+});
+
+// ---- own tooling by self-identification + the 2026-10-24 session ----
+test("internal SQL: own tooling patterns and the Oct 24 session are excluded from outside windows, exact patterns only", async () => {
+  assert.ok(API_INTERNAL.includes(API_SELF) && API_INTERNAL.includes(API_SESSIONS));
+  assert.match(API_SELF, /blob7 LIKE '%IndexAgenticaLinkCheck%'/);
+  assert.match(API_SELF, /blob7 LIKE 'indexagentica-build%'/);
+  assert.match(API_SELF, /blob5 LIKE 'indexagentica-%'/);
+  assert.ok(!/LIKE '%indexagentica%'/i.test(API_INTERNAL), "no broad host-name match (third-party bots carry it in their UA)");
+  assert.match(API_SESSIONS, /2026-10-24 05:10:00.*2026-10-24 05:15:00/);
+  assert.match(API_SESSIONS, /blob12 = 'SE' AND double3 = 13335 AND \(blob7 = 'curl\/8.14.1' OR blob5 = 'ia-example'\)/);
+  sqlRows = byShape({});
+  sqlCalls.length = 0;
+  await queryTotals({ ...BASE_ENV, CF_ACCOUNT_ID: "acct", CF_ANALYTICS_TOKEN: "tok" }, "timestamp > NOW() - INTERVAL '1' DAY", uaClass);
+  const main = sqlCalls.map((c) => c.q).find((q) => q.includes("AS cls"));
+  assert.ok(main.includes(`AND NOT ${API_INTERNAL}`), "outside = NOT (flag OR retro OR self OR session)");
+});
+
+test("by_rule: rule 'client' counts as ua; shape unchanged", () => {
+  const t = totalsFromRows({ internalApi: [{ route: "mcp", rule: "client", n: "2" }, { route: "mcp", rule: "ua", n: "1" }, { route: "rest", rule: "", n: "4" }] }, uaClass);
+  assert.deepEqual(t.internal_excluded.by_rule, { header: 0, ua: 3, ip: 0, retroactive: 4 });
+  assert.deepEqual(Object.keys(t.internal_excluded), Object.keys(emptyTotals().internal_excluded));
+});
+
+test("log time: MCP clientInfo name indexagentica-* is flagged internal (rule client) even without header/UA", () => {
+  const log = newLog(new Request("https://mcp.test/mcp", { headers: { "user-agent": "node" } }), "/mcp");
+  log.clientName = "indexagentica-linkcheck";
+  const dp = dataPoint(log, 200, {});
+  assert.deepEqual(dp.blobs.slice(BLOBS.indexOf("traffic")), ["internal", "client"]);
+  const other = newLog(new Request("https://mcp.test/mcp", { headers: { "user-agent": "node" } }), "/mcp");
+  other.clientName = "my-indexagentica-fork";
+  assert.deepEqual(dataPoint(other, 200, {}).blobs.slice(BLOBS.indexOf("traffic")), ["outside", ""], "prefix only");
+  const hdr = { ...newLog(new Request("https://mcp.test/mcp"), "/mcp"), rule: "header", clientName: "indexagentica-e2e" };
+  assert.equal(dataPoint(hdr, 200, {}).blobs[BLOBS.indexOf("internal_rule")], "header", "existing rule kept");
+});
+
+test("/stats after a ROLLUP_VERSION bump: previous snapshot served as stale while the new one is computed", async () => {
+  _resetStatsCache();
+  sqlRows = byShape({ hits: [{ event: "pageview", kind: "", n: "9" }] });
+  const env = statsEnv();
+  const prevKey = SNAPSHOT_KEY.replace(/v(\d+)$/, (_, v) => `v${Number(v) - 1}`);
+  const old = { at: Date.now() - 60000, body: { status: "ok", generated: "2026-01-01T00:00:00.000Z", stats_url: "https://mcp.test/stats", windows: {} } };
+  env.STATS_KV.m.set(prevKey, JSON.stringify(old));
+  const w = pending();
+  const r = await getStats(env, w.ctx);
+  assert.equal(r.status, 200);
+  assert.equal((await r.json()).generated, "2026-01-01T00:00:00.000Z", "old body, immediately");
+  assert.match(r.headers.get("cache-control"), /max-age=60\b/);
+  await w.settle();
+  const cur = JSON.parse(env.STATS_KV.m.get(SNAPSHOT_KEY));
+  assert.equal(cur.body.windows.last_24h.site.page_views, 9, "new-version snapshot computed in the background");
+  _resetStatsCache();
+  assert.equal((await (await getStats(env, {})).json()).windows.last_24h.site.page_views, 9);
 });

@@ -209,7 +209,7 @@ stored (`/stats` also catches up missing days lazily). `since.mcp_api` (`STATS_A
 with request logging) and `since.site_beacon` (`STATS_BEACON_SINCE`, deploy of the beacon) label where
 counting starts; nothing earlier is estimated or backfilled. Only the server's own tool names are
 published (anything else is `unknown_tool`). The response body is precomputed: a cron every 5 minutes
-(`*/5 * * * *`) stores a snapshot in `STATS_KV` (`stats:snapshot:v3`; `generated` is when it was
+(`*/5 * * * *`) stores a snapshot in `STATS_KV` (`stats:snapshot:v<ROLLUP_VERSION>`; `generated` is when it was
 computed), and requests always get the last snapshot immediately (stale-while-revalidate: once it is
 older than 10 minutes, one refresh runs in the background, single-flight per isolate plus a short KV
 lock). Each SQL query has a 10 s timeout, a whole recompute a 25 s budget, queries run in parallel.
@@ -237,6 +237,7 @@ internal if any rule matches (`src/internal.js`):
 | --- | --- |
 | `header` | `X-Indexagentica-Internal: 1` (allowed in CORS; `test/e2e.mjs` sends it on every request) |
 | `ua` | User-Agent contains `indexagentica` (our clients use `indexagentica-<agent>/1`) |
+| `client` | MCP `clientInfo.name` starts with `indexagentica-` (set in `src/analytics.js`; counted under `ua` in `by_rule`) |
 | `ip` | client IP inside a CIDR listed in the optional secret `INTERNAL_IPS` (comma-separated, IPv4/IPv6). Unset: our shared box egresses through rotating addresses in a shared relay range, so an IP rule would also drop strangers |
 
 Rows logged before the flag existed (2026-10-12) are matched retroactively in SQL by the signature of
@@ -246,6 +247,14 @@ documented launch and verification windows (2026-10-02 20:15–20:45 and 2026-10
 and site beacons from the US between 05:00 and 05:50 UTC on 2026-10-03. This is best effort: internal
 sessions that looked like outside traffic may still be counted, and outside requests with the same
 generic clients inside those windows are excluded.
+
+For any date, SQL also excludes our own tooling by its exact self-identification (`API_SELF`): User-Agent
+token `IndexAgenticaLinkCheck` (the site link checker; it ran unflagged 2026-10-03..11), User-Agent
+starting `indexagentica-build`, MCP client names `indexagentica-*`; and one documented session logged
+as outside traffic (`API_SESSIONS`): 2026-10-24 05:10–05:15 UTC, Sweden / AS13335 (our shared box),
+curl/8.14.1 or client `ia-example`. A broad `%indexagentica%` UA match is deliberately not used in
+SQL: third-party bots put our host name in their UA. Rule changes bump `ROLLUP_VERSION`, so stored
+days are recomputed (2 per snapshot run, while Analytics Engine still has the rows).
 
 How our own agents should call the server:
 
