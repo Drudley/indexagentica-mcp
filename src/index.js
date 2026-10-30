@@ -7,7 +7,7 @@ import { getData } from "./data.js";
 import { openapi } from "./openapi.js";
 import { newLog, noteArgs, writeLog } from "./analytics.js";
 import { handleHit } from "./hits.js";
-import { statsResponse, rollup, refreshSnapshot, CACHE_SECONDS, toolCallBreakdown, StatsError } from "./stats.js";
+import { statsResponse, rollup, refreshSnapshot, CACHE_SECONDS, toolCallBreakdown, trafficBreakdown, StatsError } from "./stats.js";
 import { uaClass } from "./ua.js";
 import { internalRule } from "./internal.js";
 import { matchSkillPath, handleSkillDownload } from "./downloads.js";
@@ -232,6 +232,20 @@ async function handle(request, env, ctx, url, path, log) {
 
     if (path === "/v1/requests" || path.startsWith("/v1/requests/")) {
       return withRl(requestsRoute(request, env, ctx, url, path, method, log));
+    }
+
+    // Admin diagnostics (Bearer REQUESTS_ADMIN_TOKEN): API rows in a time range (internal-rule audits).
+    if (path === "/v1/admin/traffic") {
+      if (!isAdmin(request, env)) return errorJson(401, "unauthorized", "Admin token required.", {}, { "www-authenticate": "Bearer" });
+      if (method !== "GET") return errorJson(405, "method_not_allowed", "GET only.", {}, { allow: "GET, OPTIONS" });
+      if (!env.CF_ANALYTICS_TOKEN || !env.CF_ACCOUNT_ID) return errorJson(503, "not_configured", "Analytics queries need CF_ACCOUNT_ID and the CF_ANALYTICS_TOKEN secret (optional; see SELF_HOSTING.md).");
+      const from = Date.parse(url.searchParams.get("from") || ""), to = Date.parse(url.searchParams.get("to") || "");
+      if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return errorJson(400, "invalid_range", "from and to are ISO timestamps, from < to (at most 31 days).");
+      try {
+        return json(200, await trafficBreakdown(env, from, to, { traffic: url.searchParams.get("traffic") || "" }), { "cache-control": "no-store" });
+      } catch (err) {
+        return errorJson(502, "analytics_error", err instanceof StatsError ? err.message.slice(0, 120) : "Analytics query failed.");
+      }
     }
 
     // Admin diagnostics (Bearer REQUESTS_ADMIN_TOKEN): requested tool names incl. unknown ones.

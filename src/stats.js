@@ -238,6 +238,19 @@ export async function toolCallBreakdown(env, hours = 48, now = Date.now()) {
   return { hours: h, generated: new Date(now).toISOString(), by_tool, non_canonical: unknown, rows: rows.length };
 }
 
+/**
+ * Admin diagnostics (GET /v1/admin/traffic, Bearer REQUESTS_ADMIN_TOKEN): API rows in [from, to)
+ * grouped by route, method, tool, client, User-Agent, country, ASN and traffic flag, so internal
+ * sessions can be identified precisely before a stats rule is written. Never public.
+ */
+export async function trafficBreakdown(env, fromMs, toMs, { traffic = "" } = {}) {
+  const span = Math.min(Math.max(toMs - fromMs, 60000), 31 * DAY_MS);
+  const to = fromMs + span;
+  const tf = traffic === "outside" ? ` AND NOT ${API_INTERNAL}` : traffic === "internal" ? ` AND ${API_INTERNAL}` : "";
+  const rows = await sql(env, `SELECT blob1 AS route, blob3 AS method, blob4 AS tool, blob5 AS client, blob7 AS ua, blob12 AS country, double3 AS asn, blob18 AS traffic, blob19 AS rule, SUM(_sample_interval) AS n, MIN(timestamp) AS first, MAX(timestamp) AS last FROM ${MCP_DS} WHERE timestamp >= ${sqlTime(fromMs)} AND timestamp < ${sqlTime(to)}${tf} GROUP BY route, method, tool, client, ua, country, asn, traffic, rule ORDER BY n DESC LIMIT 1000 FORMAT JSON`);
+  return { from: new Date(fromMs).toISOString(), to: new Date(to).toISOString(), traffic: traffic || "all", rows };
+}
+
 /** Totals for one time condition (SQL WHERE fragment): outside traffic, plus what was excluded. */
 export async function queryTotals(env, cond, classify, opts = {}) {
   const out = `${cond} AND NOT ${API_INTERNAL}`;
