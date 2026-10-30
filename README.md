@@ -46,6 +46,7 @@ The same Worker also answers at `https://indexagentica-mcp.indexagentica.workers
 | GET | `/v1/requests/admin?status=` | Curator: full queue (Bearer `REQUESTS_ADMIN_TOKEN`) |
 | POST | `/v1/requests/<id>/status` | Curator: `{status, entry_id?, note?}` or `{delete: true}` (Bearer token) |
 | GET | `/v1/admin/tool-calls?hours=48` | Admin: outside `tools/call` counts by requested tool name and client, incl. unknown names (Bearer token; not on /stats) |
+| GET | `/v1/admin/traffic?from=&to=&traffic=outside\|internal&dataset=hits` | Admin: rows in a time range (max 31 days) grouped by route, method, tool, client, UA, country, ASN, traffic flag and rule; `dataset=hits` for site beacons and direct downloads (Bearer token; internal-rule audits) |
 | GET | `/health` | Liveness (not rate limited) |
 
 Errors are always JSON: `{"error":{"status":400,"code":"bad_request","message":"..."}}`
@@ -236,7 +237,7 @@ internal if any rule matches (`src/internal.js`):
 | Rule | Match |
 | --- | --- |
 | `header` | `X-Indexagentica-Internal: 1` (allowed in CORS; `test/e2e.mjs` sends it on every request) |
-| `ua` | User-Agent contains `indexagentica` (our clients use `indexagentica-<agent>/1`) |
+| `ua` | User-Agent with one of our exact tokens: starts with `indexagentica-` (our clients use `indexagentica-<agent>/1`; the site build `indexagentica-build`) or contains `IndexAgenticaLinkCheck/` (site link checker). Not a substring match: third-party crawlers that mention our host in their UA (e.g. BrickBlueBot) are outside traffic |
 | `client` | MCP `clientInfo.name` starts with `indexagentica-` (set in `src/analytics.js`; counted under `ua` in `by_rule`) |
 | `ip` | client IP inside a CIDR listed in the optional secret `INTERNAL_IPS` (comma-separated, IPv4/IPv6). Unset: our shared box egresses through rotating addresses in a shared relay range, so an IP rule would also drop strangers |
 
@@ -250,10 +251,11 @@ generic clients inside those windows are excluded.
 
 For any date, SQL also excludes our own tooling by its exact self-identification (`API_SELF`): User-Agent
 token `IndexAgenticaLinkCheck` (the site link checker; it ran unflagged 2026-10-03..11), User-Agent
-starting `indexagentica-build`, MCP client names `indexagentica-*`; and one documented session logged
+starting `indexagentica-`, MCP client names `indexagentica-*`; and one documented session logged
 as outside traffic (`API_SESSIONS`): 2026-10-24 05:10–05:15 UTC, Sweden / AS13335 (our shared box),
 curl/8.14.1 or client `ia-example`. A broad `%indexagentica%` UA match is deliberately not used in
-SQL: third-party bots put our host name in their UA. Rule changes bump `ROLLUP_VERSION`, so stored
+SQL: third-party bots put our host name in their UA. Until 2026-10-30 the log-time `ua` rule was a substring match, so rows flagged `ua` count as
+internal only if they also match `API_SELF`; the rest (BrickBlueBot, Mesh-Integration) count as outside again. Rule changes bump `ROLLUP_VERSION`, so stored
 days are recomputed (2 per snapshot run, while Analytics Engine still has the rows).
 
 How our own agents should call the server:

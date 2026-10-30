@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { uaClass } from "../src/ua.js";
 import { validateHit, knownPaths, entryHosts, hitDataPoint, HIT_BLOBS } from "../src/hits.js";
-import { totalsFromRows, addTotals, emptyTotals, rollup, allTime, _resetStatsCache, queryTotals, API_INTERNAL, API_RETRO, HITS_INTERNAL, uaFamily, cleanName, sql, SNAPSHOT_KEY, CACHE_SECONDS, API_SELF, API_SESSIONS } from "../src/stats.js";
+import { totalsFromRows, addTotals, emptyTotals, rollup, allTime, _resetStatsCache, queryTotals, API_INTERNAL, API_RETRO, HITS_INTERNAL, uaFamily, cleanName, sql, SNAPSHOT_KEY, CACHE_SECONDS, API_SELF, API_SESSIONS, API_FLAGGED } from "../src/stats.js";
 import { internalRule } from "../src/internal.js";
 import { prepare } from "../src/data.js";
 import { dataPoint, newLog, BLOBS } from "../src/analytics.js";
@@ -279,7 +279,7 @@ test("rollup days from an older version are recomputed", async () => {
   const env = { ...BASE_ENV, CF_ACCOUNT_ID: "acct", CF_ANALYTICS_TOKEN: "tok", STATS_KV: kv, STATS_API_SINCE: "2026-10-03T05:00:00Z", STATS_BEACON_SINCE: "2026-10-03T05:00:00Z" };
   const r = await rollup(env, uaClass, { now: Date.parse("2026-10-04T12:00:00Z") });
   assert.deepEqual(r.stored, ["2026-10-03"]);
-  assert.equal(JSON.parse(kv.m.get("day:2026-10-03")).v, 4);
+  assert.equal(JSON.parse(kv.m.get("day:2026-10-03")).v, 5);
   assert.equal(JSON.parse(kv.m.get("day:2026-10-03")).totals.mcp.requests, 1);
 });
 
@@ -470,7 +470,7 @@ test("cron: */5 precomputes the snapshot, 00:30 runs the daily rollup", async ()
 test("internal SQL: own tooling patterns and the Oct 24 session are excluded from outside windows, exact patterns only", async () => {
   assert.ok(API_INTERNAL.includes(API_SELF) && API_INTERNAL.includes(API_SESSIONS));
   assert.match(API_SELF, /blob7 LIKE '%IndexAgenticaLinkCheck%'/);
-  assert.match(API_SELF, /blob7 LIKE 'indexagentica-build%'/);
+  assert.match(API_SELF, /blob7 LIKE 'indexagentica-%'/);
   assert.match(API_SELF, /blob5 LIKE 'indexagentica-%'/);
   assert.ok(!/LIKE '%indexagentica%'/i.test(API_INTERNAL), "no broad host-name match (third-party bots carry it in their UA)");
   assert.match(API_SESSIONS, /2026-10-24 05:10:00.*2026-10-24 05:15:00/);
@@ -517,4 +517,38 @@ test("/stats after a ROLLUP_VERSION bump: previous snapshot served as stale whil
   assert.equal(cur.body.windows.last_24h.site.page_views, 9, "new-version snapshot computed in the background");
   _resetStatsCache();
   assert.equal((await (await getStats(env, {})).json()).windows.last_24h.site.page_views, 9);
+});
+
+// ---- narrowed ua rule: third-party crawlers that mention our host are outside traffic ----
+const BRICK = "BrickBlueBot/0.1 (+https://brick.blue/bot?h=mcp.indexagentica.com; agentic-web registry)";
+const LINKCHECK = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 IndexAgenticaLinkCheck/1.0";
+test("log time: ua rule matches only our exact tokens", () => {
+  const r = (ua, h = {}) => internalRule(new Request("https://mcp.test/mcp", { headers: { "user-agent": ua, ...h } }), {});
+  for (const ua of ["indexagentica-builder/1", "indexagentica-build", "indexagentica-build/2026-10-30", "indexagentica-steward/1", "indexagentica-e2e/1", "indexagentica-internal-healthcheck", LINKCHECK]) assert.equal(r(ua), "ua", ua);
+  for (const ua of [BRICK, "Mesh-Integration/1.0 (+https://indexagentica.com/agents/)", "Mesh-Integration/1.0 (+indexagentica)", "my-indexagentica-fork/1", "IndexAgentica", "curl/8.14.1"]) assert.equal(r(ua), "", ua);
+  assert.equal(r(BRICK, { "x-indexagentica-internal": "1" }), "header", "header still wins");
+});
+
+test("BrickBlueBot: counted as outside agent traffic, labelled by its crawler name", () => {
+  assert.equal(uaClass(BRICK), "agent");
+  assert.equal(uaFamily(BRICK, uaClass), "brickbluebot");
+  assert.equal(probeOf("GET", BRICK), "bot", "a skill fetch would be a crawler probe, not a download");
+});
+
+test("internal SQL: stored ua-rule flags count only with our exact tokens (history re-included)", () => {
+  assert.equal(API_FLAGGED, "(blob18 = 'internal' AND blob19 != 'ua')");
+  assert.ok(API_INTERNAL.startsWith(`(${API_FLAGGED} OR `));
+  assert.ok(!API_INTERNAL.includes("(blob18 = 'internal' OR"), "the bare stored flag no longer decides on its own");
+  // Our tokens still match in SQL (rows flagged ua by them stay internal via API_SELF).
+  for (const pat of ["blob7 LIKE '%IndexAgenticaLinkCheck%'", "blob7 LIKE 'indexagentica-%'", "blob5 LIKE 'indexagentica-%'"]) assert.ok(API_SELF.includes(pat), pat);
+  // A tiny evaluator for the LIKE patterns over sample stored rows.
+  const like = (v, p) => new RegExp("^" + p.split("%").map((x) => x.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")).join(".*") + "$").test(v);
+  const self = (row) => like(row.ua, "%IndexAgenticaLinkCheck%") || like(row.ua, "indexagentica-%") || like(row.client, "indexagentica-%");
+  const internal = (row) => (row.flag === "internal" && row.rule !== "ua") || self(row);
+  assert.equal(internal({ flag: "internal", rule: "ua", ua: BRICK, client: "BrickBlueBot" }), false);
+  assert.equal(internal({ flag: "internal", rule: "ua", ua: "Mesh-Integration/1.0 (+https://indexagentica.com/agents/)", client: "" }), false);
+  assert.equal(internal({ flag: "internal", rule: "ua", ua: LINKCHECK, client: "" }), true);
+  assert.equal(internal({ flag: "internal", rule: "ua", ua: "indexagentica-executor/1", client: "" }), true);
+  assert.equal(internal({ flag: "internal", rule: "header", ua: BRICK, client: "" }), true);
+  assert.equal(internal({ flag: "internal", rule: "ip", ua: "curl/8", client: "" }), true);
 });

@@ -3,7 +3,11 @@
 // exclusion is auditable as internal_excluded). The flag never identifies a person.
 //
 //   header  X-Indexagentica-Internal: 1  (our E2E suite and agents send it)
-//   ua      User-Agent containing "indexagentica" (e.g. indexagentica-e2e/1, indexagentica-steward/1)
+//   ua      User-Agent with one of our exact tokens: it starts with "indexagentica-" (our agents and
+//           scripts: indexagentica-builder/1, indexagentica-steward/1, indexagentica-build..., e2e) or
+//           carries the site link checker's token "IndexAgenticaLinkCheck/". Not a substring match:
+//           third-party crawlers put our host name in their UA (BrickBlueBot: "...?h=mcp.indexagentica.com")
+//           and are outside traffic.
 //   client  MCP clientInfo name starting "indexagentica-" (set when the data point is built,
 //           src/analytics.js; counted under "ua" in internal_excluded.by_rule)
 //   ip      client IP inside INTERNAL_IPS (secret; comma-separated IPs/CIDRs, v4 or v6). Matched in
@@ -14,7 +18,7 @@
 import { clientKey } from "./ratelimit.js";
 
 export const INTERNAL_HEADER = "x-indexagentica-internal";
-const UA_RE = /indexagentica/i;
+export const OWN_UA_RE = /^indexagentica-|IndexAgenticaLinkCheck\//i;
 
 function parseIp(s) {
   s = String(s || "").trim();
@@ -50,7 +54,7 @@ export function ipInCidr(ip, cidr) {
 export function internalRule(request, env = {}) {
   const h = request.headers.get(INTERNAL_HEADER);
   if (h && h.trim() && h.trim() !== "0") return "header";
-  if (UA_RE.test(request.headers.get("user-agent") || "")) return "ua";
+  if (OWN_UA_RE.test(request.headers.get("user-agent") || "")) return "ua";
   const list = String(env.INTERNAL_IPS || "").split(",").map((s) => s.trim()).filter(Boolean);
   if (list.length) {
     const ip = clientKey(request);

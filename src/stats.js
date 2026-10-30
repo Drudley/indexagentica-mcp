@@ -19,7 +19,7 @@ export const CACHE_SECONDS = 600;
 export const DEFAULT_API_SINCE = "2026-10-02T20:21:47Z"; // first deploy with request logging on
 const MCP_DS = "indexagentica_mcp";
 const HITS_DS = "indexagentica_hits";
-const ROLLUP_VERSION = 4; // v2: internal traffic excluded, breakdowns added; v3: retro rule without the colo gate; v4: own tooling by UA/client name + the 2026-10-24 session (older days are recomputed)
+const ROLLUP_VERSION = 5; // v2: internal traffic excluded, breakdowns added; v3: retro rule without the colo gate; v4: own tooling by UA/client name + the 2026-10-24 session; v5: ua rule narrowed to our exact tokens, third-party UAs that only mention our host count again (older days are recomputed)
 // Canonical tool names + unadvertised aliases come from src/tools.js so the stats can't drift
 // from the server (request_listing was missing here, so its calls were bucketed as unknown_tool).
 import { canonicalToolName } from "./tools.js";
@@ -63,12 +63,18 @@ export const API_RETRO = `(blob18 = '' AND (blob5 = 'e2e' OR (blob12 = 'US' AND 
 // (UA token IndexAgenticaLinkCheck, GitHub Actions; it ran unflagged 2026-10-03..11), the site build
 // (UA indexagentica-build...) and MCP clients named indexagentica-*. Exact patterns only: a broad
 // '%indexagentica%' would also match third-party bots that put our host name in their UA.
-export const API_SELF = "(blob7 LIKE '%IndexAgenticaLinkCheck%' OR blob7 LIKE 'indexagentica-build%' OR blob5 LIKE 'indexagentica-%')";
+// Same tokens as the log-time ua rule (OWN_UA_RE in src/internal.js) plus the client rule.
+export const API_SELF = "(blob7 LIKE '%IndexAgenticaLinkCheck%' OR blob7 LIKE 'indexagentica-%' OR blob5 LIKE 'indexagentica-%')";
+// The stored flag counts unless it came only from the old broad ua rule (UA containing
+// "indexagentica" anywhere, 2026-10-12..10-30): those rows are internal only if API_SELF matches,
+// so third-party crawlers such as BrickBlueBot (UA "...?h=mcp.indexagentica.com") and
+// Mesh-Integration ("+https://indexagentica.com/agents/") count as outside traffic again.
+export const API_FLAGGED = "(blob18 = 'internal' AND blob19 != 'ua')";
 // One documented session that was logged as outside traffic: the Author's wrong-tool-name tests on
 // 2026-10-24 05:10-05:15 UTC from our shared box (curl/8.14.1, and the guide's example client
 // ia-example, Sweden, Cloudflare WARP AS13335). Every SE / AS13335 row in that window was ours.
 export const API_SESSIONS = "(timestamp >= toDateTime('2026-10-24 05:10:00') AND timestamp < toDateTime('2026-10-24 05:15:00') AND blob12 = 'SE' AND double3 = 13335 AND (blob7 = 'curl/8.14.1' OR blob5 = 'ia-example'))";
-export const API_INTERNAL = `(blob18 = 'internal' OR ${API_RETRO} OR ${API_SELF} OR ${API_SESSIONS})`;
+export const API_INTERNAL = `(${API_FLAGGED} OR ${API_RETRO} OR ${API_SELF} OR ${API_SESSIONS})`;
 // Site beacons before the flag: our own curl + headless-browser checks during the beacon launch session.
 export const HITS_RETRO = "(blob8 = '' AND blob7 = 'US' AND timestamp >= toDateTime('2026-10-03 05:00:00') AND timestamp < toDateTime('2026-10-03 05:50:00'))";
 export const HITS_INTERNAL = `(blob8 = 'internal' OR ${HITS_RETRO})`;
@@ -411,9 +417,9 @@ const DEFINITIONS = {
 
 const INTERNAL_RULES = {
   header: "Request carries the header X-Indexagentica-Internal: 1 (our tests, monitors and agents send it).",
-  ua: "User-Agent contains \"indexagentica\" (our own clients identify themselves, e.g. indexagentica-e2e/1), or the MCP client name (clientInfo) starts with \"indexagentica-\".",
+  ua: "User-Agent with one of our exact tokens (it starts with \"indexagentica-\", e.g. indexagentica-builder/1, or carries the site link checker's token IndexAgenticaLinkCheck/), or the MCP client name (clientInfo) starts with \"indexagentica-\". A User-Agent that only mentions our host name (third-party crawlers) is outside traffic.",
   ip: "Client IP inside a configured internal range (INTERNAL_IPS secret; unset unless our egress is stable).",
-  retroactive: "Logged before 2026-10-12, when the flag did not exist yet: matched by the signature of our own sessions (MCP client name e2e, our test suite; or curl/node/python/headless-Chrome from the US during the documented launch and verification windows 2026-10-02 20:15-20:45 and 2026-10-03 04:55-05:50 UTC; site beacons from the US between 05:00 and 05:50 UTC on 2026-10-03); plus, for any date, our site link checker (User-Agent token IndexAgenticaLinkCheck), site build (indexagentica-build) and MCP clients named indexagentica-*, and one test session on 2026-10-24 05:10-05:15 UTC (curl/8.14.1 and the example client ia-example from our shared box).",
+  retroactive: "Logged before 2026-10-12, when the flag did not exist yet: matched by the signature of our own sessions (MCP client name e2e, our test suite; or curl/node/python/headless-Chrome from the US during the documented launch and verification windows 2026-10-02 20:15-20:45 and 2026-10-03 04:55-05:50 UTC; site beacons from the US between 05:00 and 05:50 UTC on 2026-10-03); plus, for any date, our site link checker (User-Agent token IndexAgenticaLinkCheck), User-Agents starting indexagentica- and MCP clients named indexagentica-*, and one test session on 2026-10-24 05:10-05:15 UTC (curl/8.14.1 and the example client ia-example from our shared box).",
 };
 
 export async function computeStats(env, classify, base, now = Date.now(), opts = {}) {
