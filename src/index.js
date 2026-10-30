@@ -242,7 +242,7 @@ async function handle(request, env, ctx, url, path, log) {
       const from = Date.parse(url.searchParams.get("from") || ""), to = Date.parse(url.searchParams.get("to") || "");
       if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return errorJson(400, "invalid_range", "from and to are ISO timestamps, from < to (at most 31 days).");
       try {
-        return json(200, await trafficBreakdown(env, from, to, { traffic: url.searchParams.get("traffic") || "" }), { "cache-control": "no-store" });
+        return json(200, await trafficBreakdown(env, from, to, { traffic: url.searchParams.get("traffic") || "", dataset: url.searchParams.get("dataset") || "" }), { "cache-control": "no-store" });
       } catch (err) {
         return errorJson(502, "analytics_error", err instanceof StatsError ? err.message.slice(0, 120) : "Analytics query failed.");
       }

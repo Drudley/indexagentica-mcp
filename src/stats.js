@@ -253,9 +253,15 @@ export async function toolCallBreakdown(env, hours = 48, now = Date.now()) {
  * grouped by route, method, tool, client, User-Agent, country, ASN and traffic flag, so internal
  * sessions can be identified precisely before a stats rule is written. Never public.
  */
-export async function trafficBreakdown(env, fromMs, toMs, { traffic = "" } = {}) {
+export async function trafficBreakdown(env, fromMs, toMs, { traffic = "", dataset = "" } = {}) {
   const span = Math.min(Math.max(toMs - fromMs, 60000), 31 * DAY_MS);
   const to = fromMs + span;
+  if (dataset === "hits") {
+    // Site beacons and direct downloads (no User-Agent column): event, path, kind, class, country, flag, probe.
+    const hf = traffic === "outside" ? ` AND NOT ${HITS_INTERNAL}` : traffic === "internal" ? ` AND ${HITS_INTERNAL}` : "";
+    const rows = await sql(env, `SELECT blob1 AS event, blob2 AS path, blob5 AS kind, blob6 AS cls, blob7 AS country, blob8 AS traffic, blob9 AS rule, blob10 AS probe, SUM(_sample_interval) AS n, MIN(timestamp) AS first, MAX(timestamp) AS last FROM ${HITS_DS} WHERE timestamp >= ${sqlTime(fromMs)} AND timestamp < ${sqlTime(to)}${hf} GROUP BY event, path, kind, cls, country, traffic, rule, probe ORDER BY n DESC LIMIT 1000 FORMAT JSON`);
+    return { from: new Date(fromMs).toISOString(), to: new Date(to).toISOString(), traffic: traffic || "all", dataset: "hits", rows };
+  }
   const tf = traffic === "outside" ? ` AND NOT ${API_INTERNAL}` : traffic === "internal" ? ` AND ${API_INTERNAL}` : "";
   const rows = await sql(env, `SELECT blob1 AS route, blob3 AS method, blob4 AS tool, blob5 AS client, blob7 AS ua, blob12 AS country, double3 AS asn, blob18 AS traffic, blob19 AS rule, SUM(_sample_interval) AS n, MIN(timestamp) AS first, MAX(timestamp) AS last FROM ${MCP_DS} WHERE timestamp >= ${sqlTime(fromMs)} AND timestamp < ${sqlTime(to)}${tf} GROUP BY route, method, tool, client, ua, country, asn, traffic, rule ORDER BY n DESC LIMIT 1000 FORMAT JSON`);
   return { from: new Date(fromMs).toISOString(), to: new Date(to).toISOString(), traffic: traffic || "all", rows };
