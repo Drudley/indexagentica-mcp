@@ -193,7 +193,7 @@ The Worker ([`src/downloads.js`](src/downloads.js)) checks `<id>` against `^[a-z
 `404`, and the `Location` is always built from `DATA_BASE_URL`, so it is not an open redirect. It writes
 one row to `indexagentica_hits` (event `direct`, index `hit:direct`, same columns; `blob2` is the
 request path) and answers `302` with `Cache-Control: no-store`. `HEAD` requests and crawler / link
-checker / monitor User-Agents (`BOT_UA_RE`) are stored with `blob10` = `head` / `bot` and reported as
+checker / monitor User-Agents (`BOT_UA_RE`, term list in [`src/probes.js`](src/probes.js)) are stored with `blob10` = `head` / `bot` and reported as
 `site.direct_downloads.crawlers_and_probes`, not as downloads. Internal traffic is flagged as usual.
 The route has its own rate-limit counter (`dl:`); over the limit the redirect still works but the
 request is not recorded. The site's own HTML download buttons keep linking to the static files and
@@ -228,6 +228,23 @@ stripped to `[a-z0-9._ -]`, top 10, only names seen ≥ 3 times), `top_user_agen
 out, by rule). KV days carry a rollup version (`v`); days from an older version are recomputed while the
 raw data is still retained, so rule changes apply retroactively. The lazy catch-up recomputes at most 2
 days per `/stats` call and the cron 5 per run (each day is ~7 SQL subrequests; Workers Free allows 50).
+
+### Probes, monitors and crawlers
+
+Outside MCP / REST requests whose User-Agent (`blob7`) or MCP client name (`blob5`) matches `API_PROBE`
+([`src/probes.js`](src/probes.js)) are not counted in `mcp.requests`, `mcp.tool_calls`, `api.requests`,
+`agent_vs_human`, `mcp.top_clients` or `top_user_agent_families`; they are reported as
+`mcp.probes {requests, tool_calls}` and `api.probes {requests}`. The rule is the direct-download
+crawler list (`BOT_UA_RE`, same terms from the same module) plus API-only probe terms (probe, liveness,
+health, check, verify, conformance, audit, scan, research, census, survey, harvester, collector,
+indexer, inventory, observatory); user-initiated fetchers (ChatGPT-User, Claude-User,
+Perplexity-User, MistralAI-User) never match. Analytics Engine SQL has no regex, so the SQL form is
+generated as `ILIKE` clauses from the same list (`bot` only at the end of a word, as `bot\b`);
+`test/stats.test.mjs` checks that SQL and JS agree. Raw rows are untouched, internal traffic is
+excluded first (a probe that is internal stays in `internal_excluded`), and the API query only adds a
+`probe` column, so the subrequest count is unchanged. Known gap: probes with a generic User-Agent
+(node, python-requests, Go-http-client, empty, browser-like) only match on the request that carries
+their client name (MCP `initialize`); the rest of such a session counts.
 
 ### Internal traffic
 

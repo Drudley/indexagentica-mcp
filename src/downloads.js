@@ -16,13 +16,13 @@ import { getData } from "./data.js";
 import { uaClass } from "./ua.js";
 import { internalRule } from "./internal.js";
 import { checkRateLimit } from "./ratelimit.js";
+import { BOT_UA_RE } from "./probes.js";
 
 export const SKILL_PATH_RE = /^\/skills\/([a-z0-9]+(?:-[a-z0-9]+)*)(\.zip|\/SKILL\.md)$/;
 const MAX_ID = 64;
-// Crawlers, link checkers, previewers and uptime monitors. Agent fetchers acting for a user
-// (Claude-User, ChatGPT-User, curl, MCP clients) are not matched and count as downloads.
-export const BOT_UA_RE =
-  /bot\b|bot\/|crawl|spider|slurp|scrapy|facebookexternalhit|embedly|preview|uptime|monitor|pingdom|statuscake|linkcheck|link-check|validator|lighthouse|pagespeed|headless|phantomjs|archiver|feedfetcher|externalhit/i;
+// Crawler / link-checker / monitor UAs: the shared term list in src/probes.js (also used by the
+// API stats as API_PROBE, so the two stay in sync). Re-exported for existing importers.
+export { BOT_UA_RE };
 
 /** @returns {{id: string, kind: "zip"|"skill_md"} | null} for a /skills/... path, else null */
 export function matchSkillPath(path) {

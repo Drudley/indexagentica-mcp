@@ -19,10 +19,12 @@ export const CACHE_SECONDS = 600;
 export const DEFAULT_API_SINCE = "2026-10-02T20:21:47Z"; // first deploy with request logging on
 const MCP_DS = "indexagentica_mcp";
 const HITS_DS = "indexagentica_hits";
-const ROLLUP_VERSION = 5; // v2: internal traffic excluded, breakdowns added; v3: retro rule without the colo gate; v4: own tooling by UA/client name + the 2026-10-24 session; v5: ua rule narrowed to our exact tokens, third-party UAs that only mention our host count again (older days are recomputed)
+const ROLLUP_VERSION = 6; // v2: internal traffic excluded, breakdowns added; v3: retro rule without the colo gate; v4: own tooling by UA/client name + the 2026-10-24 session; v5: ua rule narrowed to our exact tokens, third-party UAs that only mention our host count again (older days are recomputed); v6: probes / monitors / crawlers (API_PROBE) excluded and counted in mcp.probes / api.probes
 // Canonical tool names + unadvertised aliases come from src/tools.js so the stats can't drift
 // from the server (request_listing was missing here, so its calls were bucketed as unknown_tool).
 import { canonicalToolName } from "./tools.js";
+import { API_PROBE } from "./probes.js";
+export { API_PROBE };
 const KNOWN_OPS = ["search", "get_entry", "get_content", "list_content", "list_categories"];
 const TOP_N = 10;
 const TOP_MIN = 3; // client names / UA families are only published once seen this many times
@@ -79,6 +81,13 @@ export const API_INTERNAL = `(${API_FLAGGED} OR ${API_RETRO} OR ${API_SELF} OR $
 export const HITS_RETRO = "(blob8 = '' AND blob7 = 'US' AND timestamp >= toDateTime('2026-10-03 05:00:00') AND timestamp < toDateTime('2026-10-03 05:50:00'))";
 export const HITS_INTERNAL = `(blob8 = 'internal' OR ${HITS_RETRO})`;
 
+// ---- probes (src/probes.js) ----
+// Outside MCP / REST requests whose User-Agent or MCP client name is a crawler, monitor, registry
+// liveness probe or scanner (API_PROBE: the direct-download BOT_UA_RE terms plus API-only probe
+// terms). They stay in the raw log; the api query flags them (column probe) so they are counted in
+// mcp.probes / api.probes instead of requests, tool calls, agent_vs_human, clients and UA families.
+// Internal traffic is excluded first and is never counted as a probe.
+
 export function emptyTotals() {
   return {
     site: {
@@ -86,8 +95,8 @@ export function emptyTotals() {
       downloads: { total: 0, zip: 0, skill_md: 0, by_skill: {} }, // clicks on the site (beacon)
       direct_downloads: { total: 0, zip: 0, skill_md: 0, by_skill: {}, crawlers_and_probes: { total: 0, head: 0, bot: 0 } }, // GET /skills/* on this host
     },
-    mcp: { requests: 0, tool_calls: 0, tool_calls_by_tool: {}, by_client: { agent: 0, human: 0 }, clients: {} },
-    api: { requests: 0, by_operation: {}, by_client: { agent: 0, human: 0 } },
+    mcp: { requests: 0, tool_calls: 0, tool_calls_by_tool: {}, by_client: { agent: 0, human: 0 }, clients: {}, probes: { requests: 0, tool_calls: 0 } },
+    api: { requests: 0, by_operation: {}, by_client: { agent: 0, human: 0 }, probes: { requests: 0 } },
     agent_vs_human: { agent: 0, human: 0 },
     user_agent_families: {},
     internal_excluded: { mcp_requests: 0, api_requests: 0, page_views: 0, outbound_clicks: 0, downloads: 0, direct_downloads: 0, by_rule: { header: 0, ua: 0, ip: 0, retroactive: 0 } },
@@ -132,6 +141,11 @@ export function totalsFromRows({ api = [], legacy = [], hits = [], clients = [],
     const c = n(r.n);
     const route = r.route === "mcp" ? "mcp" : r.route === "rest" ? "api" : null;
     if (!route) continue;
+    if (r.probe === "probe") {
+      t[route].probes.requests += c;
+      if (route === "mcp" && r.method === "tools/call") t.mcp.probes.tool_calls += c;
+      continue;
+    }
     t[route].requests += c;
     if (route === "mcp" && r.method === "tools/call") {
       t.mcp.tool_calls += c;
@@ -275,12 +289,13 @@ export async function trafficBreakdown(env, fromMs, toMs, { traffic = "", datase
 
 /** Totals for one time condition (SQL WHERE fragment): outside traffic, plus what was excluded. */
 export async function queryTotals(env, cond, classify, opts = {}) {
-  const out = `${cond} AND NOT ${API_INTERNAL}`;
+  const outAll = `${cond} AND NOT ${API_INTERNAL}`; // outside traffic incl. probes (api query flags them)
+  const out = `${outAll} AND NOT ${API_PROBE}`;
   const hout = `${cond} AND NOT ${HITS_INTERNAL}`;
   const S = "SUM(_sample_interval) AS n";
   const q = (label) => ({ ...opts, label: `${opts.label || "window"}:${label}` });
   const [api, hits, clients, uas, internalApi, internalHits] = await Promise.all([
-    sql(env, `SELECT blob1 AS route, blob3 AS method, blob4 AS tool, blob17 AS cls, ${S} FROM ${MCP_DS} WHERE ${out} GROUP BY route, method, tool, cls FORMAT JSON`, q("api")),
+    sql(env, `SELECT blob1 AS route, blob3 AS method, blob4 AS tool, blob17 AS cls, if(${API_PROBE}, 'probe', '') AS probe, ${S} FROM ${MCP_DS} WHERE ${outAll} GROUP BY route, method, tool, cls, probe FORMAT JSON`, q("api")),
     sql(env, `SELECT blob1 AS event, blob5 AS kind, blob3 AS id, blob10 AS probe, ${S} FROM ${HITS_DS} WHERE ${hout} GROUP BY event, kind, id, probe FORMAT JSON`, q("hits")),
     sql(env, `SELECT blob5 AS client, ${S} FROM ${MCP_DS} WHERE ${out} AND blob1 = 'mcp' AND blob5 != '' GROUP BY client ORDER BY n DESC LIMIT ${KEEP_PER_DAY} FORMAT JSON`, q("clients")),
     sql(env, `SELECT blob7 AS ua, ${S} FROM ${MCP_DS} WHERE ${out} GROUP BY ua ORDER BY n DESC LIMIT 500 FORMAT JSON`, q("uas")),
@@ -288,7 +303,7 @@ export async function queryTotals(env, cond, classify, opts = {}) {
     sql(env, `SELECT blob1 AS event, blob9 AS rule, ${S} FROM ${HITS_DS} WHERE ${cond} AND ${HITS_INTERNAL} GROUP BY event, rule FORMAT JSON`, q("internal_hits")),
   ]);
   // Rows written before the ua_class column existed: classify from the stored (truncated) User-Agent.
-  const legacy = api.some((r) => r.cls !== "human" && r.cls !== "agent")
+  const legacy = api.some((r) => r.probe !== "probe" && r.cls !== "human" && r.cls !== "agent")
     ? await sql(env, `SELECT blob1 AS route, blob7 AS ua, ${S} FROM ${MCP_DS} WHERE ${out} AND blob17 = '' GROUP BY route, ua FORMAT JSON`, q("legacy"))
     : [];
   return totalsFromRows({ api, legacy, hits, clients, uas, internalApi, internalHits }, classify);
@@ -403,15 +418,17 @@ const DEFINITIONS = {
   "site.downloads": "Clicks on skill downloads (zip or raw SKILL.md) on the site (browser beacon). Direct downloads are in site.direct_downloads.",
   "site.direct_downloads": "Direct skill downloads: GET requests to https://mcp.indexagentica.com/skills/<id>.zip or /skills/<id>/SKILL.md (the links in llms.txt, the JSON API and MCP get_content), which then redirect to the static file. Counted since the route went live (2026-10-19). HEAD requests and crawler / link-checker / monitor User-Agents are not downloads; they are counted in crawlers_and_probes (head, bot). Fetching the static files on indexagentica.com directly is not counted.",
   "site.skill_downloads": "Total skill downloads = site.downloads (clicks) + site.direct_downloads (excluding crawlers_and_probes), overall and by skill. A click on the site that is then fetched through a counted link is not double-counted, because the site's own buttons link to the static files.",
-  "mcp.requests": "All POST /mcp requests (initialize, tools/list, tools/call, ...).",
-  "mcp.tool_calls": "MCP tools/call requests, by tool.",
-  "api.requests": "REST/JSON requests to the search API (search, get_entry, get_content, list_content, list_categories, other = landing, OpenAPI, server card, entry list, errors). /stats, /hit and /health are not counted.",
-  agent_vs_human: "MCP + REST requests split by User-Agent: browser user agents count as human, everything else as agent/programmatic.",
+  "mcp.requests": "All requests to /mcp (any HTTP method: initialize, tools/list, tools/call, notifications, GET/HEAD, ...), excluding probes (see mcp.probes).",
+  "mcp.tool_calls": "MCP tools/call requests, by tool, excluding probes.",
+  "mcp.probes": "Requests to /mcp from probes, monitors and crawlers, not counted in any other MCP or API number: the User-Agent or the MCP client name (clientInfo) contains a crawler / monitor token (bot, crawl, spider, uptime, monitor, validator, headless, ...; the same list as the direct-download crawler check) or a probe token (probe, liveness, health, check, verify, conformance, audit, scan, research, census, survey, harvester, collector, indexer, inventory, observatory). User-initiated fetchers (ChatGPT-User, Claude-User, Perplexity-User, MistralAI-User) are never probes. tool_calls = tools/call requests among them.",
+  "api.requests": "REST/JSON requests to the search API (search, get_entry, get_content, list_content, list_categories, other = landing, OpenAPI, server card, entry list, errors), excluding probes (see api.probes). /stats, /hit and /health are not counted.",
+  "api.probes": "REST/JSON requests from probes, monitors and crawlers (same rule as mcp.probes), not counted in api.requests.",
+  agent_vs_human: "MCP + REST requests (probes excluded) split by User-Agent: browser user agents count as human, everything else as agent/programmatic.",
   "site.downloads.by_skill": "Skill download clicks by skill id.",
   "site.direct_downloads.by_skill": "Direct skill downloads by skill id.",
   "site.outbound_clicks_by_entry": "Outbound link clicks by listing id.",
-  "mcp.top_clients": `Most frequent MCP client names (clientInfo.name sent on initialize, self-reported, lowercased and stripped to [a-z0-9._ -]); top ${TOP_N}, only names seen at least ${TOP_MIN} times.`,
-  top_user_agent_families: `MCP + REST requests by User-Agent family (bot/crawler name, "browser", "headless-chrome", or the first product token); top ${TOP_N}, only families seen at least ${TOP_MIN} times.`,
+  "mcp.top_clients": `Most frequent MCP client names, probes excluded (clientInfo.name sent on initialize, self-reported, lowercased and stripped to [a-z0-9._ -]); top ${TOP_N}, only names seen at least ${TOP_MIN} times.`,
+  top_user_agent_families: `MCP + REST requests (probes excluded) by User-Agent family (bot/crawler name, "browser", "headless-chrome", or the first product token); top ${TOP_N}, only families seen at least ${TOP_MIN} times.`,
   internal_excluded: "Requests and beacons from our own testing and agents, excluded from every other number in the window, with the rule that matched (see internal_rules).",
 };
 
@@ -448,6 +465,7 @@ export async function computeStats(env, classify, base, now = Date.now(), opts =
       "Human vs agent is a User-Agent heuristic, not identity.",
       "Our own traffic is excluded by the rules in internal_rules. Before 2026-10-12 it is matched retroactively by session signature, which is a best effort: internal sessions that looked like outside traffic (e.g. other clients or other times) may still be counted, outside requests with the same generic clients inside those windows are excluded, and the owner's own browser visits are not identifiable.",
       "MCP client names are self-reported by the client and can be anything.",
+      "Probes are recognized by User-Agent and MCP client name only (see mcp.probes). A probe with a generic User-Agent (node, python-requests, Go-http-client, an empty or browser-like one) and no telling client name on that request is counted as normal traffic; MCP sends the client name only on initialize, so the later requests of such a session usually count.",
       "Analytics Engine data can lag a few minutes; this response is cached for up to 10 minutes.",
     ],
     privacy: "https://indexagentica.com/agents/#privacy",

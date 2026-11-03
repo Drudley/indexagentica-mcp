@@ -279,7 +279,7 @@ test("rollup days from an older version are recomputed", async () => {
   const env = { ...BASE_ENV, CF_ACCOUNT_ID: "acct", CF_ANALYTICS_TOKEN: "tok", STATS_KV: kv, STATS_API_SINCE: "2026-10-03T05:00:00Z", STATS_BEACON_SINCE: "2026-10-03T05:00:00Z" };
   const r = await rollup(env, uaClass, { now: Date.parse("2026-10-04T12:00:00Z") });
   assert.deepEqual(r.stored, ["2026-10-03"]);
-  assert.equal(JSON.parse(kv.m.get("day:2026-10-03")).v, 5);
+  assert.equal(JSON.parse(kv.m.get("day:2026-10-03")).v, 6);
   assert.equal(JSON.parse(kv.m.get("day:2026-10-03")).totals.mcp.requests, 1);
 });
 
@@ -551,4 +551,115 @@ test("internal SQL: stored ua-rule flags count only with our exact tokens (histo
   assert.equal(internal({ flag: "internal", rule: "ua", ua: "indexagentica-executor/1", client: "" }), true);
   assert.equal(internal({ flag: "internal", rule: "header", ua: BRICK, client: "" }), true);
   assert.equal(internal({ flag: "internal", rule: "ip", ua: "curl/8", client: "" }), true);
+});
+
+// ---- probes: shared term list, SQL == JS, excluded from public totals, counted in mcp.probes ----
+import { API_PROBE, isApiProbe, API_PROBE_RE, BOT_TERMS, USER_FETCHER_TERMS } from "../src/probes.js";
+
+/** Evaluate the generated API_PROBE SQL in JS (ILIKE = case-insensitive LIKE with % and _). */
+function evalProbeSql(ua, client) {
+  const like = (v, pat) => new RegExp(`^${pat.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&").replace(/%/g, ".*").replace(/_/g, ".")}$`, "is").test(v);
+  const js = API_PROBE.replace(/(blob\d+) ILIKE '([^']*)'/g, (_, col, pat) => `like(${col}, ${JSON.stringify(pat)})`).replace(/ OR /g, " || ").replace(/ AND NOT /g, " && !");
+  assert.ok(!/ILIKE|\bOR\b|\bAND\b/.test(js), "only ILIKE / OR / AND NOT in API_PROBE");
+  return new Function("like", "blob7", "blob5", `return ${js};`)(like, ua, client);
+}
+
+const PROBE_CASES = [
+  ["SentinelOracle/0.1 (+https://glimind.com/opt-out; liveness-only, never invokes tools)", "glimind-probe", true],
+  ["mcpbeat/0.1 (+https://mcpbeat.com/bot/; liveness check)", "", true],
+  ["mcp-health-probe/0.1 (read-only; initialize+tools/list only)", "mcp-health", true],
+  ["AgentRankProbe/0.1 (+https://spark.tail6ec125.ts.net/developers)", "", true],
+  ["rokmcp-collector/0.2 (+https://rokmcp.com/bot)", "", true],
+  ["node", "AgentsJunction health checker", true],
+  ["Go-http-client/2.0", "verifymcp-probe", true],
+  ["python-requests/2.33.0", "posthog-mcp-registry-probe", true],
+  ["", "toolrator-mcp-validator", true],
+  ["BrickBlueBot/0.1 (+https://brick.blue/bot?h=mcp.indexagentica.com; agentic-web registry)", "BrickBlueBot", true],
+  ["Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", "", true],
+  ["Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/141.0.0.0 Safari/537.36", "", true],
+  ["MCPWatch/0.1.0 (+mcpwatch@iyre.com) longitudinal MCP security research", "", true],
+  ["UptimeRobot/2.0", "", true],
+  ["chatbot", "", true], ["x", "MyBot", true], ["x", "some-bot", true],
+  // user-initiated fetchers and ordinary clients count as usage
+  ["Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko; compatible; ChatGPT-User/1.0; +https://openai.com/bot)", "", false],
+  ["Claude-User/1.0", "", false],
+  ["node", "", false], ["", "", false], ["python-httpx/0.28.1", "", false], ["Go-http-client/2.0", "", false],
+  ["codex-mcp-client/0.164.0-alpha.11.1", "codex-mcp-client", false], ["claude-code/2.1.0", "claude-code", false],
+  ["Google", "mcp", false], ["node", "glama", false], ["Talaria", "talaria-catalog", false],
+  ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36", "", false],
+  ["robotics-agent", "", false], ["abbott/1", "bots_x", false], ["botanist/1.0", "", false],
+];
+
+test("probes: BOT_UA_RE is unchanged and built from the shared list; API_PROBE_RE = BOT terms + probe terms", () => {
+  assert.equal(BOT_UA_RE.source, "bot\\b|bot\\/|crawl|spider|slurp|scrapy|facebookexternalhit|embedly|preview|uptime|monitor|pingdom|statuscake|linkcheck|link-check|validator|lighthouse|pagespeed|headless|phantomjs|archiver|feedfetcher|externalhit");
+  assert.ok(API_PROBE_RE.source.startsWith(BOT_UA_RE.source + "|"), "API probe regex extends the download list");
+  for (const t of BOT_TERMS) assert.ok(API_PROBE.includes(`blob7 ILIKE '%${t}%'`) && API_PROBE.includes(`blob5 ILIKE '%${t}%'`), t);
+  for (const t of USER_FETCHER_TERMS) assert.ok(API_PROBE.includes(`blob7 ILIKE '%${t}%'`), t);
+  assert.ok(!/LIKE '[^']*['\\][^']*'/.test(API_PROBE.replace(/ILIKE '[^']*'/g, "")), "no stray quotes");
+});
+
+test("probes: the SQL condition and the JS classifier agree", () => {
+  for (const [ua, client, want] of PROBE_CASES) {
+    assert.equal(isApiProbe(ua, client), want, `js ${client} | ${ua}`);
+    assert.equal(evalProbeSql(ua, client), want, `sql ${client} | ${ua}`);
+  }
+  // every non-word character the regex accepts after "bot" (SQL-safe ones) agrees too
+  for (const c of " !\"#$&()*+,-./:;<=>?@[]^`{|}~") assert.equal(evalProbeSql(`xbot${c}1`, ""), isApiProbe(`xbot${c}1`, ""), c);
+});
+
+test("probes: totals count probe rows only in mcp.probes / api.probes", () => {
+  const t = totalsFromRows({ api: [
+    { route: "mcp", method: "tools/call", tool: "search", cls: "agent", probe: "", n: "4" },
+    { route: "mcp", method: "tools/call", tool: "__verifymcp_auth_probe_x", cls: "agent", probe: "probe", n: "3" },
+    { route: "mcp", method: "initialize", tool: "", cls: "agent", probe: "probe", n: "100" },
+    { route: "mcp", method: "initialize", tool: "", cls: "human", probe: "", n: "2" },
+    { route: "rest", method: "", tool: "search", cls: "agent", probe: "probe", n: "7" },
+    { route: "rest", method: "", tool: "search", cls: "agent", probe: "", n: "1" },
+  ] }, uaClass);
+  assert.equal(t.mcp.requests, 6);
+  assert.equal(t.mcp.tool_calls, 4);
+  assert.deepEqual(t.mcp.tool_calls_by_tool, { search: 4 });
+  assert.deepEqual(t.mcp.probes, { requests: 103, tool_calls: 3 });
+  assert.equal(t.api.requests, 1);
+  assert.deepEqual(t.api.probes, { requests: 7 });
+  assert.deepEqual(t.agent_vs_human, { agent: 5, human: 2 });
+  assert.deepEqual(addTotals(t, emptyTotals()).mcp.probes, { requests: 103, tool_calls: 3 });
+  const old = emptyTotals(); delete old.mcp.probes; delete old.api.probes; // a v5-shaped day still adds up
+  assert.deepEqual(addTotals(old, t).api.probes, { requests: 7 });
+});
+
+test("probes SQL: api query flags probes, public breakdowns exclude them, internal exclusion unchanged, still 6 queries", async () => {
+  sqlRows = byShape({});
+  sqlCalls.length = 0;
+  await queryTotals({ ...BASE_ENV, CF_ACCOUNT_ID: "acct", CF_ANALYTICS_TOKEN: "tok" }, "timestamp > NOW() - INTERVAL '1' DAY", uaClass);
+  const qs = sqlCalls.map((c) => c.q);
+  const main = qs.find((q) => q.includes("AS cls"));
+  assert.ok(main.includes(`if(${API_PROBE}, 'probe', '') AS probe`) && /GROUP BY route, method, tool, cls, probe /.test(main));
+  assert.ok(main.includes(`AND NOT ${API_INTERNAL}`) && !main.includes(`AND NOT ${API_PROBE}`), "probes are counted, not dropped, by the api query");
+  for (const label of ["AS client", "blob7 AS ua, SUM"]) assert.ok(qs.find((q) => q.includes(label)).includes(`AND NOT ${API_INTERNAL} AND NOT ${API_PROBE}`), label);
+  for (const q of qs.filter((q) => q.includes("AS rule"))) assert.ok(!q.includes(API_PROBE), "internal_excluded is not touched by the probe rule");
+  assert.equal(qs.length, 6);
+  sqlRows = byShape({ api: [{ route: "rest", method: "", tool: "", cls: "", probe: "", n: "1" }] });
+  sqlCalls.length = 0;
+  await queryTotals({ ...BASE_ENV, CF_ACCOUNT_ID: "acct", CF_ANALYTICS_TOKEN: "tok" }, "timestamp > NOW() - INTERVAL '1' DAY", uaClass);
+  const legacy = sqlCalls.map((c) => c.q).find((q) => q.includes("blob17 = ''"));
+  assert.ok(legacy && legacy.includes(`AND NOT ${API_PROBE}`), "legacy (pre-ua_class) rows exclude probes too");
+});
+
+test("/stats: probes reported separately, definitions say all /mcp requests and probes excluded", async () => {
+  _resetStatsCache();
+  sqlRows = byShape({ api: [
+    { route: "mcp", method: "tools/list", tool: "", cls: "agent", probe: "probe", n: "50" },
+    { route: "mcp", method: "tools/call", tool: "search", cls: "agent", probe: "", n: "2" },
+  ] });
+  const env = { ...BASE_ENV, CF_ACCOUNT_ID: "acct", CF_ANALYTICS_TOKEN: "tok", STATS_KV: fakeKV(), STATS_BEACON_SINCE: new Date(Date.now() - 3600e3).toISOString(), STATS_API_SINCE: new Date(Date.now() - 7200e3).toISOString() };
+  const b = await (await worker.fetch(new Request("https://mcp.test/stats"), env, { waitUntil() {} })).json();
+  for (const w of ["last_24h", "last_7d", "all_time"]) {
+    assert.equal(b.windows[w].mcp.requests, 2, w);
+    assert.deepEqual(b.windows[w].mcp.probes, { requests: 50, tool_calls: 0 }, w);
+    assert.deepEqual(b.windows[w].api.probes, { requests: 0 }, w);
+  }
+  assert.ok(!/POST/.test(b.definitions["mcp.requests"]) && /All requests to \/mcp/.test(b.definitions["mcp.requests"]) && /excluding probes/.test(b.definitions["mcp.requests"]));
+  assert.ok(b.definitions["mcp.probes"] && b.definitions["api.probes"]);
+  assert.ok(b.caveats.some((c) => /Probes are recognized/.test(c)));
 });
